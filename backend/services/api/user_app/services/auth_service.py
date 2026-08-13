@@ -484,11 +484,14 @@ class AuthService:
                 username=user_data.username,
                 email=user_data.email,
                 password_hash=self._hash_password(user_data.password),
-                full_name=user_data.full_name,
             )
             session.add(user)
 
-            profile = UserProfile(user_id=user_id, tenant_id=user_data.tenant_id)
+            profile = UserProfile(
+                user_id=user_id,
+                tenant_id=user_data.tenant_id,
+                display_name=user_data.full_name or user_data.username,
+            )
             session.add(profile)
 
             await session.commit()

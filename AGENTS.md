@@ -83,7 +83,7 @@ Required `.env` keys (defaults in `docker-compose.yml`):
 
 ## Deployment Workflow
 
-After making code changes, always:
+<!-- After making code changes, always:
 1. **Commit to git**: Create a commit with descriptive message
 2. **Deploy to server**: SSH to `quant-server` and pull/deploy updates
 
@@ -101,4 +101,4 @@ ssh quant-server "cd /opt/quantmind && git pull && docker-compose restart"
 - `backend/main_oss.py` - Unified entry point for all backend services
 - `backend/run_tests.py` - Test runner with multiple modes
 - `backend/shared/` - Shared modules across services
-- `docker-compose.yml` - Local deployment configuration
+- `docker-compose.yml` - Local deployment configuration -->

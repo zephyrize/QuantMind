@@ -2,6 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+RUN if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+      sed -i 's/deb.debian.org/mirrors.aliyun.com/g; s/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources; \
+    else \
+      sed -i 's/deb.debian.org/mirrors.aliyun.com/g; s/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list; \
+    fi
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
@@ -9,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 数据源依赖
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ \
     akshare \
     pandas \
     numpy \

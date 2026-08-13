@@ -68,6 +68,12 @@ async def lifespan(app: FastAPI):
 
         await init_database()
 
+        from backend.services.api.user_app.services.bootstrap import (
+            ensure_auth_schema_and_admin,
+        )
+
+        await ensure_auth_schema_and_admin()
+
         from backend.services.api.routers.admin.model_management import (
             ensure_admin_tables,
         )

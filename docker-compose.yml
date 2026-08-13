@@ -25,7 +25,7 @@ services:
       retries: 5
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "15432:5432"
     networks:
       - quantmind-net
 
@@ -34,7 +34,7 @@ services:
     image: redis:7-alpine
     container_name: quantmind-redis
     ports:
-      - "6379:6379"
+      - "16379:6379"
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru --databases 16 --bind 0.0.0.0
     volumes:
       - redis-data:/data
@@ -56,16 +56,17 @@ services:
       args:
         TORCH_DEVICE: ${TORCH_DEVICE:-cpu}
         TORCH_CPU_INDEX_URL: ${TORCH_CPU_INDEX_URL:-https://mirrors.aliyun.com/pytorch-wheels/cpu}
+        TORCH_GPU_INDEX_URL: ${TORCH_GPU_INDEX_URL:-https://download.pytorch.org/whl/cu128}
     platform: linux/amd64
     # GPU 可选：无 NVIDIA 驱动的主机请保持注释。
     # 有 GPU 加速训练需求时取消注释（需安装 nvidia-container-toolkit）。
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     container_name: quantmind
     depends_on:
       db:
@@ -255,6 +256,9 @@ services:
       - QM_INVESTMENT_DATA_DIR=${QM_INVESTMENT_DATA_DIR:-/data/third_party/investment_data}
       - QM_SIMONLIN_A_DIR=${QM_SIMONLIN_A_DIR:-/data/third_party/simonlin_a_stock}
     volumes:
+      # Read administrator credentials on each backend process start. This
+      # lets an edited local .env take effect with `docker compose restart`.
+      - ./.env:/app/.env:ro
       # 运行时数据
       - ./data:/data
       # AI 模型文件 (按需下载)
@@ -461,6 +465,11 @@ services:
       - ./data:/data
       - ./db:/app/db
     command: celery -A backend.services.engine.qlib_app.celery_config:celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'celery.*beat' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
     networks:
       - quantmind-net
@@ -595,7 +604,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:1200/healthz >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:1200/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
       interval: 30s
       timeout: 5s
       retries: 5

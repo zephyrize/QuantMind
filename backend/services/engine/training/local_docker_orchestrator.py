@@ -68,50 +68,47 @@ _PROTECTED_PREFIXES: tuple[str, ...] = tuple(
 )
 
 # 宿主机 compose 工作目录
-_raw = (os.getenv("HOST_PROJECT_PATH") or "").strip()
-if _raw and _raw != ".":
-    _HOST_PROJECT_PATH = Path(_raw).resolve()
-else:
-    # 退化为当前工作目录（容器内通常为 /app）
-    _HOST_PROJECT_PATH = Path.cwd().resolve()
-
-# 数据目录：feature_snapshots 在 /app/db/feature_snapshots（来自 ./db:/app/db 挂载）
-# Docker volume host path 需要宿主机绝对路径
-if Path("/app/db/feature_snapshots").exists():
-    _LOCAL_DATA_PATH = str(_HOST_PROJECT_PATH / "db" / "feature_snapshots")
-elif Path("/data/feature_snapshots").exists():
-    _LOCAL_DATA_PATH = str(_HOST_PROJECT_PATH / "data" / "feature_snapshots")
-else:
-    _LOCAL_DATA_PATH = str(_HOST_PROJECT_PATH / "db" / "feature_snapshots")
-
-# QuantDB 数据目录：train.py 需要读取 instrument_detail.parquet（行业编码）等全量数据
-# 注意 QM_QUANTDB_DATA_DIR 是【容器内】路径（如 /data/quantdb，来自 ./data:/data 挂载），
-# 而 Docker volume 的 source 必须是【宿主机】绝对路径，不能直接使用该值。
-# 这里把容器内路径换算回宿主机路径，语义与 _LOCAL_DATA_PATH 保持一致。
 _qdb_dir = os.getenv("QM_QUANTDB_DATA_DIR", "").strip() or "/data/quantdb"
-_qdb_path = Path(_qdb_dir)
-if _qdb_path.is_relative_to("/data"):
-    # /data/quantdb → <host_project>/data/quantdb
-    _QUANTDB_DATA_HOST_PATH = str(
-        _HOST_PROJECT_PATH / "data" / _qdb_path.relative_to("/data")
-    )
-elif _qdb_path.is_relative_to("/app"):
-    # /app/data/quantdb → <host_project>/data/quantdb
-    _QUANTDB_DATA_HOST_PATH = str(
-        _HOST_PROJECT_PATH / _qdb_path.relative_to("/app")
-    )
-elif _qdb_path.is_absolute():
-    _QUANTDB_DATA_HOST_PATH = str(_qdb_path)
-else:
-    _QUANTDB_DATA_HOST_PATH = str(_HOST_PROJECT_PATH / _qdb_path)
 
-# 训练脚本：./docker/training/train.py 挂载到容器内 /app/docker/training/
-_TRAINING_SCRIPT_HOST_PATH = str(_HOST_PROJECT_PATH / "docker" / "training" / "train.py")
+
+def _resolve_bind_mount_source(
+    container_path: Path, mounts: list[dict[str, Any]]
+) -> str | None:
+    """Translate a path visible in this container to Docker-daemon source path.
+
+    The Docker SDK talks to the host daemon through ``/var/run/docker.sock``.
+    Therefore a child container's volume source must use the source shown by
+    ``docker inspect``, not this service container's ``/app`` or ``/data``
+    path.  This is essential on Docker Desktop, where the daemon sees paths
+    such as ``/run/desktop/mnt/host/c/...``.
+    """
+    candidates: list[tuple[int, Path, str]] = []
+    for mount in mounts:
+        if mount.get("Type") != "bind":
+            continue
+        source = mount.get("Source")
+        destination = mount.get("Destination")
+        if not source or not destination:
+            continue
+        destination_path = Path(destination)
+        try:
+            container_path.relative_to(destination_path)
+        except ValueError:
+            continue
+        candidates.append((len(destination_path.parts), destination_path, source))
+
+    if not candidates:
+        return None
+
+    _, destination_path, source = max(candidates, key=lambda item: item[0])
+    relative_path = container_path.relative_to(destination_path)
+    return str(Path(source) / relative_path)
 
 
 class LocalDockerOrchestrator(TrainingOrchestrator):
     def __init__(self):
         self.docker = DockerClient.from_env()
+        self._self_mounts: list[dict[str, Any]] | None = None
         self.api_base = (
             os.getenv("QUANTMIND_API_BASE_URL") or "http://quantmind-api:8000"
         ).strip()
@@ -123,6 +120,34 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                 "Set it in .env or QUANTMIND_ENV=development for auto-generation."
             )
         self.log_stream = TrainingRunLogStream()
+
+    def _get_self_mounts(self) -> list[dict[str, Any]]:
+        """Get this service container's bind mounts from the Docker daemon."""
+        if self._self_mounts is not None:
+            return self._self_mounts
+
+        container_id = os.getenv("HOSTNAME", "").strip()
+        if not container_id:
+            raise RuntimeError("Cannot determine current container ID for volume mapping")
+        try:
+            container = self.docker.containers.get(container_id)
+            self._self_mounts = list(container.attrs.get("Mounts") or [])
+        except Exception as exc:
+            raise RuntimeError(
+                "Cannot inspect the QuantMind container mount mappings; "
+                "local Docker training requires access to /var/run/docker.sock"
+            ) from exc
+        return self._self_mounts
+
+    def _daemon_host_path(self, container_path: Path) -> Path:
+        """Return the exact source path the Docker daemon can mount."""
+        source = _resolve_bind_mount_source(container_path, self._get_self_mounts())
+        if source is None:
+            raise RuntimeError(
+                f"No bind mount maps {container_path} to a Docker host path. "
+                "Check the quantmind service volumes before starting training."
+            )
+        return Path(source)
 
     # ── 训练期间资源保护 ──────────────────────────────────────────────────────────
     @staticmethod
@@ -517,8 +542,15 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         # 宿主机路径：/opt/quantmind/data/training_jobs/{run_id}（Docker daemon 需要）
         container_work_dir = Path("/data") / "training_jobs" / run_id
 
-        _compose_dir = _HOST_PROJECT_PATH if _HOST_PROJECT_PATH.is_absolute() else Path.cwd()
-        host_output_dir = _compose_dir / "data" / "training_jobs" / run_id
+        host_output_dir = self._daemon_host_path(container_work_dir)
+        if Path("/app/db/feature_snapshots").exists():
+            container_local_data_path = Path("/app/db/feature_snapshots")
+        else:
+            container_local_data_path = Path("/data/feature_snapshots")
+        local_data_host_path = self._daemon_host_path(container_local_data_path)
+        training_script_host_path = self._daemon_host_path(
+            Path("/app/docker/training/train.py")
+        )
 
         # 强制创建目录（使用容器内路径，确保 API 容器可写入）
         os.makedirs(internal_output_dir, exist_ok=True)
@@ -556,20 +588,21 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         # 始终挂载本地数据目录（宿主机路径，API 容器内 os.path.exists 无法感知）
         volumes: dict[str, dict[str, str]] = {
             str(host_output_dir): {"bind": "/workspace", "mode": "rw"},
-            str(_LOCAL_DATA_PATH): {"bind": _LOCAL_DATA_MOUNT_DIR, "mode": "ro"},
+            str(local_data_host_path): {"bind": _LOCAL_DATA_MOUNT_DIR, "mode": "ro"},
         }
         # 挂载 QuantDB 全量数据（6大类：kline/base_sector/financial/bond_etf/technical_derived/ml_datasets）
         # 存在性检查必须针对【容器内】可见的 _qdb_dir，而非宿主机路径
         # （API 容器内 os.path.exists 无法感知宿主机路径，与 _LOCAL_DATA_PATH 同理）
         if Path(_qdb_dir).exists():
-            volumes[_QUANTDB_DATA_HOST_PATH] = {
+            quantdb_data_host_path = self._daemon_host_path(Path(_qdb_dir))
+            volumes[str(quantdb_data_host_path)] = {
                 "bind": _QUANTDB_DATA_MOUNT_DIR,
                 "mode": "ro",
             }
             logger.info(
                 "[%s] QuantDB data mounted: %s (host) -> %s",
                 run_id,
-                _QUANTDB_DATA_HOST_PATH,
+                quantdb_data_host_path,
                 _QUANTDB_DATA_MOUNT_DIR,
             )
         else:
@@ -588,18 +621,18 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         logger.info(
             "[%s] Local data path mounted: %s -> %s",
             run_id,
-            _LOCAL_DATA_PATH,
+            local_data_host_path,
             _LOCAL_DATA_MOUNT_DIR,
         )
         # 始终挂载宿主机 train.py 覆盖镜像内脚本（注意：os.path.exists 在 API 容器内无法感知宿主机路径，固定挂载）
-        volumes[str(_TRAINING_SCRIPT_HOST_PATH)] = {
+        volumes[str(training_script_host_path)] = {
             "bind": "/app/train.py",
             "mode": "ro",
         }
         logger.info(
             "[%s] Local train.py override mounted: %s -> /app/train.py",
             run_id,
-            _TRAINING_SCRIPT_HOST_PATH,
+            training_script_host_path,
         )
         logger.info(
             "[%s] PERSISTENCE Local output mounted: %s (host) -> /workspace (container: %s)",

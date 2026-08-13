@@ -633,7 +633,7 @@ html.platform-win32.os-win10 .module-grid-container {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 10px;
   height: 100%;
   max-width: 100%;
   padding: 0 10px;
@@ -652,14 +652,14 @@ html.platform-win32.os-win10 .module-grid-container {
 .dock-group {
   display: flex;
   align-items: stretch;
-  gap: 2px;
+  gap: 8px;
 }
 
 .dock-divider {
   width: 1px;
   align-self: center;
   height: 24px;
-  margin: 0 6px;
+  margin: 0 2px;
   background: linear-gradient(180deg, rgba(148, 163, 184, 0.05), rgba(148, 163, 184, 0.34), rgba(148, 163, 184, 0.05));
 }
 

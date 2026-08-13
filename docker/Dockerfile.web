@@ -10,7 +10,8 @@ WORKDIR /app/electron
 # `monaco-editor` override against direct `^0.55.1` dep as EOVERRIDE.
 # Override is only meaningful for transitive dedupe and not needed for the web build.
 RUN node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));delete p.overrides;delete p.scripts.postinstall;fs.writeFileSync('package.json',JSON.stringify(p,null,2));"
-RUN npm install --no-audit --no-fund
+RUN ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
+    npm install --no-audit --no-fund --registry=https://registry.npmmirror.com
 
 COPY electron ./
 # Re-strip after the full electron/ copy overwrites package.json

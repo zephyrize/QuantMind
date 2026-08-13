@@ -12,7 +12,13 @@ ARG APT_MIRROR=mirrors.aliyun.com
 # 用法: docker build --build-arg TORCH_DEVICE=gpu ...
 ARG TORCH_DEVICE=cpu
 # CPU 版 torch 的国内下载源（阿里云 pytorch-wheels，含 +cpu 轮子）
-ARG TORCH_CPU_INDEX_URL=https://mirrors.aliyun.com/pytorch-wheels/cpu
+ARG TORCH_CPU_INDEX_URL=https://download.pytorch.org/whl/cpu
+# GPU 版 torch 必须从 CUDA wheel 索引安装，避免通用 PyPI 镜像在下载
+# 多 GB NVIDIA 依赖时卡住或回退到 CPU wheel。
+ARG TORCH_GPU_INDEX_URL=https://download.pytorch.org/whl/cu128
+# rd-agent is an optional factor-evolution component with a very large dependency tree.
+# Keep the default image focused on the services started by docker-compose.
+ARG INSTALL_RDAGENT=false
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -55,17 +61,25 @@ COPY requirements/production.txt /tmp/requirements-production.txt
 COPY requirements/ai.txt /tmp/requirements-ai.txt
 
 # 本地 torch wheel 目录（docker/torch_wheels/）被 .gitignore 忽略、不随代码分发。
+# CPU 和 GPU 都可复用各自设备类型的本地 wheel 缓存；GPU 构建绝不能
+# 安装 +cpu wheel，否则即使 Docker 已透传 NVIDIA GPU，PyTorch 仍无法使用 CUDA。
 # 默认按 TORCH_DEVICE 从 PyPI 安装 torch：
 #   cpu -> torch==2.9.1+cpu（仅 CPU 轮子，构建快、镜像小，无需 GPU）
 #   gpu -> torch==2.9.1（完整 CUDA 轮子，构建慢、镜像大，需 NVIDIA GPU）
-# 需要离线/定制 wheel 时自行 COPY docker/torch_wheels/ 后放开下方本地分支。
+# 本地 wheel 存在时优先安装，避免构建环境中下载大文件发生网络超时。
+COPY docker/torch_wheels/ /tmp/torch_wheels/
 RUN python -m pip install --upgrade pip setuptools wheel cython \
-    && if ls /tmp/torch_wheels/*.whl >/dev/null 2>&1; then \
-         echo "安装本地 torch wheel"; \
+    && if [ "$TORCH_DEVICE" != "gpu" ] && ls /tmp/torch_wheels/*+cpu*.whl >/dev/null 2>&1; then \
+         echo "安装本地 CPU torch wheel"; \
          python -m pip install --no-cache-dir --root-user-action=ignore /tmp/torch_wheels/*.whl; \
+       elif [ "$TORCH_DEVICE" = "gpu" ] && ls /tmp/torch_wheels/cu128/torch-*+cu128*.whl >/dev/null 2>&1; then \
+         echo "离线安装本地 CUDA 12.8 torch wheel 缓存"; \
+         python -m pip install --no-cache-dir --root-user-action=ignore --no-index \
+           --find-links /tmp/torch_wheels/cu128 "torch==2.9.1+cu128"; \
        elif [ "$TORCH_DEVICE" = "gpu" ]; then \
          echo "构建 GPU 版 torch（完整 CUDA，构建慢）"; \
-         python -m pip install --no-cache-dir --root-user-action=ignore "torch==2.9.1"; \
+         python -m pip install --no-cache-dir --root-user-action=ignore "torch==2.9.1" \
+           --index-url ${TORCH_GPU_INDEX_URL}; \
        else \
          echo "构建 CPU 版 torch（快速、无需 GPU）"; \
          python -m pip install --no-cache-dir --root-user-action=ignore "torch==2.9.1+cpu" \
@@ -88,7 +102,14 @@ RUN python /tmp/patch_qlib.py && rm /tmp/patch_qlib.py
 COPY docker/install_rdagent.sh /tmp/install_rdagent.sh
 # rd-agent 源码（OSS 克隆可能不存在；install 脚本会自行跳过）
 COPY rd-agent/ /app/rd-agent/
-RUN chmod +x /tmp/install_rdagent.sh && /tmp/install_rdagent.sh && rm /tmp/install_rdagent.sh
+RUN if [ "$INSTALL_RDAGENT" = "true" ]; then \
+      sed -i 's/\r$//' /tmp/install_rdagent.sh \
+        && sh /tmp/install_rdagent.sh; \
+    else \
+      echo "Skipping optional rd-agent installation"; \
+    fi \
+    && rm -f /tmp/install_rdagent.sh \
+    && rm -rf /app/rd-agent
 
 # 复制训练脚本（确保容器内 /app/train.py 存在，避免卷挂载失败时 Docker 创建目录）
 COPY docker/training/train.py /app/train.py

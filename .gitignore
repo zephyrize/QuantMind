@@ -173,7 +173,8 @@ db/db.zip
 /results/
 /results_v*/
 /log/
-/electron/src/data/
+/electron/src/data/*
+!/electron/src/data/qlibStrategyTemplates.ts
 /.cache/
 /.venv*/
 /Untitled*.ipynb
@@ -182,7 +183,8 @@ db/db.zip
 *.h5
 *.hdf5
 
-docker/torch_wheels/
+docker/torch_wheels/*
+!docker/torch_wheels/.gitkeep
 
 # Graphify output
 graphify-out/

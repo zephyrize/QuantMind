@@ -430,12 +430,16 @@ class AuthService {
     try {
       const tenantId = (userData.tenant_id || this.getTenantId()).trim();
       // 统一注册路径：手机号 + 短信验证码注册（阿里云短信）
-      const response = await this.postWithFallback(['/auth/register/phone'], {
+      const emailSeed = (userData.email || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '');
+      const username = (emailSeed || `user${Date.now()}`).slice(0, 128);
+      const response = await this.postWithFallback(['/auth/register'], {
         tenant_id: tenantId,
-        phone: userData.phone,
-        code: userData.sms_verification_code,
+        username,
+        email: userData.email,
         password: userData.password,
-        username: userData.full_name,
+        full_name: userData.full_name,
       });
       const endTime = Date.now();
 
