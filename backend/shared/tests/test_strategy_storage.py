@@ -198,7 +198,7 @@ class TestStrategyStorageService(unittest.IsolatedAsyncioTestCase):
     # delete()
     # ------------------------------------------------------------------
 
-    def test_delete_returns_true_on_success(self):
+    async def test_delete_returns_true_on_success(self):
         svc = self._make_service(cos_available=False)
 
         mock_session = MagicMock()
@@ -216,11 +216,11 @@ class TestStrategyStorageService(unittest.IsolatedAsyncioTestCase):
             patch("backend.shared.strategy_storage._ensure_int_user_id", return_value=1),
             patch("backend.shared.strategy_storage.get_db", new=fake_db_ctx),
         ):
-            result = svc.delete(strategy_id=1, user_id="1")
+            result = await svc.delete(strategy_id=1, user_id="1")
 
         self.assertTrue(result)
 
-    def test_delete_returns_false_when_not_found(self):
+    async def test_delete_returns_false_when_not_found(self):
         svc = self._make_service(cos_available=False)
 
         mock_session = MagicMock()
@@ -238,7 +238,7 @@ class TestStrategyStorageService(unittest.IsolatedAsyncioTestCase):
             patch("backend.shared.strategy_storage._ensure_int_user_id", return_value=1),
             patch("backend.shared.strategy_storage.get_db", new=fake_db_ctx),
         ):
-            result = svc.delete(strategy_id=999, user_id="1")
+            result = await svc.delete(strategy_id=999, user_id="1")
 
         self.assertFalse(result)
 

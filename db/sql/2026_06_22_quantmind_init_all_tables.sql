@@ -703,22 +703,22 @@ CREATE INDEX IF NOT EXISTS idx_us_user_id ON user_strategies (user_id);
 DO $$ BEGIN
     -- Create enums if they don't exist
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'orderside') THEN
-        CREATE TYPE orderside AS ENUM ('BUY', 'SELL');
+        CREATE TYPE orderside AS ENUM ('buy', 'sell');
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tradeaction') THEN
-        CREATE TYPE tradeaction AS ENUM ('OPEN', 'CLOSE', 'OPEN_REVERSE', 'CLOSE_REVERSE');
+        CREATE TYPE tradeaction AS ENUM ('buy_to_open', 'sell_to_close', 'sell_to_open', 'buy_to_close');
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'positionside') THEN
-        CREATE TYPE positionside AS ENUM ('LONG', 'SHORT');
+        CREATE TYPE positionside AS ENUM ('long', 'short');
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ordertype') THEN
-        CREATE TYPE ordertype AS ENUM ('MARKET', 'LIMIT', 'STOP', 'STOP_LIMIT');
+        CREATE TYPE ordertype AS ENUM ('market', 'limit', 'stop', 'stop_limit');
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tradingmode') THEN
         CREATE TYPE tradingmode AS ENUM ('SIMULATION', 'SHADOW', 'REAL');
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'orderstatus') THEN
-        CREATE TYPE orderstatus AS ENUM ('PENDING', 'SUBMITTED', 'PARTIAL_FILL', 'FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED');
+        CREATE TYPE orderstatus AS ENUM ('pending', 'submitted', 'partially_filled', 'filled', 'cancelled', 'rejected', 'expired');
     END IF;
 END $$;
 
@@ -1177,14 +1177,21 @@ CREATE TABLE IF NOT EXISTS quote_daily_summaries (
     high_price      FLOAT,
     low_price       FLOAT,
     close_price     FLOAT,
+    avg_price       FLOAT,
     volume          BIGINT,
+    volume_sum      BIGINT,
     amount          FLOAT,
+    amount_sum      FLOAT,
+    quote_count     INTEGER,
     pre_close       FLOAT,
     change_pct      FLOAT,
     turnover_rate   FLOAT,
-    data_source     VARCHAR(20),
+    data_source     VARCHAR(32) NOT NULL DEFAULT 'remote_redis',
+    first_quote_at  TIMESTAMPTZ,
+    last_quote_at   TIMESTAMPTZ,
     created_at      TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (symbol, trade_date)
+    updated_at      TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (trade_date, symbol, data_source)
 );
 
 -- ========================

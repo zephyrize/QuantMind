@@ -113,6 +113,9 @@ class Settings(BaseSettings):
     # 无订阅时的保活拉取标的，确保时序/落库链路持续有数据
     STREAM_WARMUP_SYMBOLS: str = "SZ000001,SH600000"
 
+    # Remote Redis is the OSS default. Enable only when the optional package is installed.
+    STREAM_ENABLE_OPENTDX_FALLBACK: bool = False
+
     # Cache TTL (seconds)
     CACHE_TTL_QUOTE: int = 1
     CACHE_TTL_KLINE: int = 60

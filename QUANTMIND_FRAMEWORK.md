@@ -189,7 +189,6 @@ STREAM_SERVICE_URL=http://127.0.0.1:8003
 # 模型训练（Docker 编排）
 INTERNAL_CALL_SECRET=quantmind-internal-secret
 TRAINING_IMAGE=quantmind-oss:latest
-HOST_PROJECT_PATH=.
 
 # QuantBot (QwenPaw 集成)
 QWENPAW_BASE_URL=http://qwenpaw:8088

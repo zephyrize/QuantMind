@@ -21,14 +21,22 @@ try:
 except RuntimeError:
     pass
 
+from backend.shared.env_loader import (
+    BACKEND_DIR,
+    PROJECT_ROOT,
+    bootstrap_environment,
+)
+
+_runtime_loaded = bootstrap_environment()
+THIS_DIR = str(BACKEND_DIR)
+PARENT_DIR = str(PROJECT_ROOT)
+
 from backend.shared.logging_config import setup_logging
 
 setup_logging(service_name="quantmind-oss")
 logger = logging.getLogger(__name__)
 
 # 后台管理页面写入的运行时密钥（config/runtime.env），真实环境变量优先
-from backend.shared.runtime_secrets import load_runtime_env
-_runtime_loaded = load_runtime_env()
 if _runtime_loaded:
     logger.info("Loaded %d runtime secrets from runtime.env", _runtime_loaded)
 
@@ -187,6 +195,15 @@ def run_celery_worker():
     ])
 
 
+def _run_service_with_crash_logging(name: str, runner, args: tuple) -> None:
+    """Run a child service and preserve its traceback in the shared log."""
+    try:
+        runner(*args)
+    except Exception:  # noqa: BLE001 - preserve child traceback
+        logger.exception("%s service process exited with an unhandled exception", name)
+        raise
+
+
 def run_all_services():
     """运行所有服务（多进程模式 + 子进程死亡自动重启 + 健康检查看门狗）"""
     import time
@@ -208,7 +225,11 @@ def run_all_services():
     state: dict = {}
 
     def _spawn(name: str, runner, args: tuple):
-        p = mp.Process(target=runner, args=args, name=f"quantmind-{name}")
+        p = mp.Process(
+            target=_run_service_with_crash_logging,
+            args=(name, runner, args),
+            name=f"quantmind-{name}",
+        )
         p.start()
         state[name] = {
             "runner": runner,
@@ -217,6 +238,7 @@ def run_all_services():
             "restarts": state.get(name, {}).get("restarts", 0),
             "last_restart": time.time(),
             "health_failures": 0,
+            "disabled": False,
         }
         return p
 
@@ -373,7 +395,7 @@ def _ensure_database_schema():
     """
     import subprocess
 
-    init_sql = "/app/backend/shared/db_init.sql"
+    init_sql = os.path.join(THIS_DIR, "shared", "db_init.sql")
     if not os.path.isfile(init_sql):
         logger.warning("数据库初始化 SQL 未找到: %s，跳过自动建表", init_sql)
         return
@@ -403,6 +425,7 @@ def _ensure_database_schema():
             logger.warning("数据库初始化有警告（可忽略，表可能已存在）: %s",
                            result.stderr[:200] if result.stderr else "")
         # 执行市场分析模块建表（qm_market_sectors 等，不在 db_init.sql 内）
+        _ensure_oss_schema_migrations(env)
         _ensure_market_analysis_tables(env)
     except FileNotFoundError:
         # psql 客户端可能未安装在镜像中，回退到 Python 方式
@@ -419,7 +442,7 @@ def _ensure_market_analysis_tables(env: dict) -> None:
     """
     import subprocess
 
-    migration_sql = "/app/backend/services/api/market_analysis/migrations/001_create_market_analysis.sql"
+    migration_sql = THIS_DIR + "/services/api/market_analysis/migrations/001_create_market_analysis.sql"
     if not os.path.isfile(migration_sql):
         logger.debug("市场分析建表 SQL 未找到: %s", migration_sql)
         return
@@ -445,9 +468,49 @@ def _ensure_market_analysis_tables(env: dict) -> None:
         logger.warning("市场分析建表失败（不影响启动）: %s", e)
 
 
+def _ensure_oss_schema_migrations(env: dict) -> None:
+    """Apply the idempotent OSS compatibility migration before services start."""
+    import subprocess
+
+    migration_sql = os.path.join(
+        THIS_DIR, "migrations", "20260814_align_oss_runtime_schema.sql"
+    )
+    if not os.path.isfile(migration_sql):
+        logger.warning("OSS schema migration SQL 未找到: %s", migration_sql)
+        return
+
+    db_host = os.getenv("DB_HOST", os.getenv("POSTGRES_HOST", "db"))
+    db_port = os.getenv("DB_PORT", "5432")
+    db_name = os.getenv("DB_NAME", os.getenv("POSTGRES_DB", "quantmind"))
+    db_user = os.getenv("DB_USER", os.getenv("POSTGRES_USER", "quantmind"))
+    try:
+        result = subprocess.run(
+            [
+                "psql", "-h", db_host, "-p", db_port, "-U", db_user,
+                "-d", db_name, "-f", migration_sql, "--quiet",
+                "-v", "ON_ERROR_STOP=1",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode == 0:
+            logger.info("OSS 数据库兼容迁移完成")
+        else:
+            logger.error(
+                "OSS 数据库兼容迁移失败: %s",
+                result.stderr[:500] if result.stderr else "unknown psql error",
+            )
+    except FileNotFoundError:
+        return
+    except Exception as e:  # noqa: BLE001
+        logger.error("OSS 数据库兼容迁移失败: %s", e)
+
+
 def _ensure_database_schema_python():
     """psql 不可用时的回退方案：用 Python psycopg2 执行初始化 SQL。"""
-    init_sql = "/app/backend/shared/db_init.sql"
+    init_sql = THIS_DIR + "/shared/db_init.sql"
     if not os.path.isfile(init_sql):
         return
 
@@ -466,11 +529,24 @@ def _ensure_database_schema_python():
             sql = f.read()
         with conn.cursor() as cur:
             cur.execute(sql)
+
+        migration_sql = os.path.join(
+            THIS_DIR, "migrations", "20260814_align_oss_runtime_schema.sql"
+        )
+        if os.path.isfile(migration_sql):
+            with open(migration_sql, "r") as f:
+                migration = f.read()
+            with conn.cursor() as cur:
+                cur.execute(migration)
+            logger.info("OSS 数据库兼容迁移完成 (Python psycopg2)")
+
         # 市场分析建表（qm_market_sectors 等，不在 db_init.sql 内）
-        market_sql = "/app/backend/services/api/market_analysis/migrations/001_create_market_analysis.sql"
+        market_sql = THIS_DIR + "/services/api/market_analysis/migrations/001_create_market_analysis.sql"
         if os.path.isfile(market_sql):
             with open(market_sql, "r") as f:
-                cur.execute(f.read())
+                market_sql_text = f.read()
+            with conn.cursor() as cur:
+                cur.execute(market_sql_text)
             logger.info("市场分析表结构自检完成 (Python psycopg2)")
         conn.close()
         logger.info("数据库表结构自检完成 (Python psycopg2)")

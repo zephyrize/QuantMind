@@ -11,6 +11,7 @@ except ImportError:
     docker = None
 
 from backend.shared.auth import get_internal_call_secret
+from backend.shared.host_paths import resolve_host_project_path
 
 logger = logging.getLogger(__name__)
 
@@ -164,10 +165,10 @@ class K8sManager:
                 # Join the same network as trade-core to allow communication
                 network="quantmind-network",
                 restart_policy={"Name": "unless-stopped"},
-                # Mount project dir for strategy code accessibility
-                # If running inside docker, we need the HOST path of the project
+                # Docker daemon-visible project root, discovered from this
+                # container's bind mounts when running under Compose.
                 volumes={
-                    os.getenv("HOST_PROJECT_PATH", os.getcwd()): {
+                    resolve_host_project_path(self.docker_client): {
                         "bind": "/app",
                         "mode": "rw",
                     }

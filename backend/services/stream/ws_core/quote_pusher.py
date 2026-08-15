@@ -119,7 +119,11 @@ class QuotePusher:
         优先 RemoteRedis，缺失时回退 opentdx 直连
         """
         redis_source = get_remote_redis_source()
-        tdx_source = get_opentdx_source()
+        tdx_source = (
+            get_opentdx_source()
+            if settings.STREAM_ENABLE_OPENTDX_FALLBACK
+            else None
+        )
 
         while self.running:
             try:
@@ -135,7 +139,7 @@ class QuotePusher:
                 # 2. Redis 未覆盖的标的，用 opentdx 直连补充
                 fetched_symbols = {r["symbol"] for r in results}
                 missing = [s for s in stock_list if s not in fetched_symbols]
-                if missing:
+                if missing and tdx_source is not None:
                     try:
                         tdx_results = await tdx_source.fetch_quotes(missing)
                         results.extend(tdx_results)

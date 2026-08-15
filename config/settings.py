@@ -2,6 +2,10 @@
 
 import os
 
+from backend.shared.env_loader import bootstrap_environment
+
+bootstrap_environment()
+
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import json
@@ -15,8 +19,12 @@ class DatabaseSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="allow")
 
     # PostgreSQL配置
-    postgres_host: str = os.getenv("DB_MASTER_HOST", "192.168.1.88")
-    postgres_port: int = int(os.getenv("DB_MASTER_PORT", "6789"))
+    postgres_host: str = os.getenv(
+        "DB_MASTER_HOST", os.getenv("DB_HOST", "127.0.0.1")
+    )
+    postgres_port: int = int(
+        os.getenv("DB_MASTER_PORT", os.getenv("DB_PORT", "5432"))
+    )
     postgres_user: str = os.getenv("DB_USER", "quantmind")
     postgres_password: str = os.getenv("DB_PASSWORD", "admin123")
     postgres_database: str = os.getenv("DB_NAME", "quantmind")

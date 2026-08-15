@@ -47,6 +47,10 @@ async def check_syntax(request: Request, item: SyntaxCheckRequest):
 
 
 from backend.shared.strategy_storage import get_strategy_storage_service
+from backend.shared.host_paths import (
+    join_host_project_path,
+    resolve_host_project_path,
+)
 
 # 存储执行任务状态
 jobs = {}
@@ -72,7 +76,6 @@ _SMOKE_CACHE: dict[str, dict[str, Any]] = {}
 
 # 使用共享卷目录，以便 Docker 宿主机能看到并挂载到下级容器
 TMP_ROOT = os.getenv("AI_IDE_TEMP_DIR", "/app/db/ai_ide_tmp")
-HOST_PROJECT_PATH = os.getenv("HOST_PROJECT_PATH", "/home/quantmind")
 
 
 def _build_runner_environment(
@@ -1088,17 +1091,19 @@ async def run_process(job_id: str, file_path: str):
     try:
         client = docker.from_env()
 
-        # 计算宿主机上的文件路径 (用于 Docker 挂载)
-        # 假设 API 容器内的 /app 对应 宿主机的 {HOST_PROJECT_PATH}
+        # 通过当前容器的 bind mount 推导 Docker daemon 可见的项目根目录。
+        host_project_path = resolve_host_project_path(client)
         rel_path = os.path.relpath(file_path, "/app")
-        host_script_path = os.path.join(HOST_PROJECT_PATH, rel_path)
-        host_runner_path = os.path.join(HOST_PROJECT_PATH, os.path.relpath(runner_path, "/app"))
+        host_script_path = join_host_project_path(host_project_path, rel_path)
+        host_runner_path = join_host_project_path(
+            host_project_path, os.path.relpath(runner_path, "/app")
+        )
 
         # Docker 挂载文件时，如果宿主机文件不存在或是目录，会挂载空目录，
         # 导致容器内 Python 报 "can't find '__main__' module"
         # 需要确保挂载点存在且是普通文件
         # 注意：由于我们在容器内运行，文件路径检查必须用容器路径（/app/...）
-        # 因为 HOST_PROJECT_PATH 路径（如 /opt/quantmind）在容器内不可见
+            # 因为 Docker daemon 的宿主机路径在容器内通常不可见
         for container_path, label in [(file_path, "strategy.py"), (runner_path, "runner.py")]:
             if os.path.isdir(container_path):
                 logger.warning(
@@ -1121,22 +1126,22 @@ async def run_process(job_id: str, file_path: str):
                 "mode": "ro",
             },
             # 挂载 Qlib 数据目录以便运行回测脚本
-            os.path.join(HOST_PROJECT_PATH, "db/qlib_data"): {
+            join_host_project_path(host_project_path, "db", "qlib_data"): {
                 "bind": "/app/db/qlib_data",
                 "mode": "ro",
             },
             # 挂载内置模块以便调用
-            os.path.join(HOST_PROJECT_PATH, "backend"): {
+            join_host_project_path(host_project_path, "backend"): {
                 "bind": "/app/backend",
                 "mode": "ro",
             },
             # 挂载模型目录，确保通过 model_id 解析到的 pred.pkl 对 AI-IDE 子容器可见
-            os.path.join(HOST_PROJECT_PATH, "models"): {
+            join_host_project_path(host_project_path, "models"): {
                 "bind": "/app/models",
                 "mode": "ro",
             },
             # 挂载数据根目录，兼容用户模型或本地存储落在 /data 下的场景
-            os.path.join(HOST_PROJECT_PATH, "data"): {
+            join_host_project_path(host_project_path, "data"): {
                 "bind": "/data",
                 "mode": "ro",
             },

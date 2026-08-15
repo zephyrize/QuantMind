@@ -58,6 +58,19 @@ export function isElectronEnv(): boolean {
   return typeof window !== 'undefined' && typeof (window as any).electronAPI === 'object';
 }
 
+function resolveDevelopmentProxyUrl(url: string | null): string | null {
+  if (!url || !ENV.DEV || typeof window === 'undefined') return url;
+  try {
+    const configured = new URL(url);
+    if (configured.hostname === window.location.hostname && configured.port === '3080') {
+      return window.location.origin;
+    }
+  } catch {
+    // Ignore malformed values and let the existing configuration handle them.
+  }
+  return url;
+}
+
 /**
  * 初始化动态服务器配置（桌面端启动时调用）
  */
@@ -93,7 +106,7 @@ export function setDynamicServerUrl(url: string): void {
  * 获取当前动态服务器配置
  */
 export function getDynamicServerUrl(): string | null {
-  return dynamicServerUrl || readPersistedServerUrl();
+  return resolveDevelopmentProxyUrl(dynamicServerUrl || readPersistedServerUrl());
 }
 
 const HOST = ENV.VITE_SERVICE_HOST || '';
@@ -116,12 +129,14 @@ const API_BASE = normalizeBaseUrl(ENV.VITE_API_BASE_URL || '');
  */
 function getBaseUrl(): string {
   // 桌面端优先使用用户配置的服务器地址
-  if (dynamicServerUrl) {
-    return dynamicServerUrl;
+  const configured = getDynamicServerUrl();
+  if (configured) {
+    return configured;
   }
-  const persisted = readPersistedServerUrl();
-  if (persisted) {
-    return persisted;
+  // Electron uses a file:// renderer in packaged builds, so a relative URL
+  // cannot reach the API. Keep web/Nginx builds on relative URLs.
+  if (isElectronEnv()) {
+    return 'http://localhost:8000';
   }
   return API_BASE;
 }
@@ -131,6 +146,15 @@ const getWebSocketUrl = () => {
   const persisted = getDynamicServerUrl();
   // 桌面端使用动态配置
   if (persisted) {
+    // The browser development server proxies WebSockets under /ws. When the
+    // current Vite origin is stored as the API base, retain that proxy path.
+    if (
+      ENV.DEV &&
+      typeof window !== 'undefined' &&
+      persisted === window.location.origin
+    ) {
+      return `${persisted.replace(/^http/, 'ws')}/ws/api/v1/ws/market`;
+    }
     return `${persisted.replace(/^http/, 'ws')}/api/v1/ws/market`;
   }
   const gateway = getBaseUrl();

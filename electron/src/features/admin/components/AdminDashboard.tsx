@@ -162,36 +162,37 @@ export const AdminDashboard: React.FC = () => {
                 {serviceStats.map((s, idx) => {
                     const isHealthy = s.healthy && s.status === 'healthy';
                     const isUnreachable = s.status === 'unreachable';
+                    const isDisabled = s.status === 'disabled';
                     return (
                         <Col xs={24} sm={12} lg={8} xl={6} key={s.service || idx}>
                             <Card className="rounded-2xl border-slate-200 shadow-sm hover:shadow-md transition-all">
                                 <div className="flex items-center justify-between mb-4">
                                     <div className="flex items-center gap-3">
-                                        <div className={`w-10 h-10 rounded-xl ${isHealthy ? 'bg-emerald-50' : isUnreachable ? 'bg-rose-50' : 'bg-amber-50'} flex items-center justify-center ${isHealthy ? 'text-emerald-600' : isUnreachable ? 'text-rose-500' : 'text-amber-500'} border ${isHealthy ? 'border-emerald-100' : isUnreachable ? 'border-rose-100' : 'border-amber-100'}`}>
+                                        <div className={`w-10 h-10 rounded-xl ${isHealthy ? 'bg-emerald-50' : isUnreachable ? 'bg-rose-50' : isDisabled ? 'bg-slate-50' : 'bg-amber-50'} flex items-center justify-center ${isHealthy ? 'text-emerald-600' : isUnreachable ? 'text-rose-500' : isDisabled ? 'text-slate-400' : 'text-amber-500'} border ${isHealthy ? 'border-emerald-100' : isUnreachable ? 'border-rose-100' : isDisabled ? 'border-slate-100' : 'border-amber-100'}`}>
                                             {iconMap[s.service] || <ApiOutlined />}
                                         </div>
                                         <div>
                                             <div className="flex items-center gap-1.5">
                                                 <Text className="font-black text-slate-800 text-sm">{s.service.toUpperCase()}</Text>
-                                                <Badge status={isHealthy ? 'processing' : 'error'} color={isHealthy ? '#10b981' : '#ef4444'} />
+                                                <Badge status={isHealthy ? 'processing' : isDisabled ? 'default' : 'error'} color={isHealthy ? '#10b981' : isDisabled ? '#94a3b8' : '#ef4444'} />
                                             </div>
                                             <Text className="text-[10px] text-slate-400 font-bold">
                                                 {s.port ? `端口 ${s.port}` : s.service === 'celery' ? '异步任务' : s.service === 'celery_beat' ? '定时调度' : `端口 ${servicePortMap[s.service] || '—'}`}
                                             </Text>
                                         </div>
                                     </div>
-                                    <Tag color={isHealthy ? 'success' : isUnreachable ? 'error' : 'warning'} className="m-0 border-none rounded-full px-2 text-[9px] font-black">
-                                        {isHealthy ? '运行中' : isUnreachable ? '不可达' : '异常'}
+                                    <Tag color={isHealthy ? 'success' : isUnreachable ? 'error' : isDisabled ? 'default' : 'warning'} className="m-0 border-none rounded-full px-2 text-[9px] font-black">
+                                        {isHealthy ? '运行中' : isUnreachable ? '不可达' : isDisabled ? '未启用' : '异常'}
                                     </Tag>
                                 </div>
                                 <div className="space-y-1.5">
                                     <div className="flex justify-between items-center text-[10px] font-black mb-1">
                                         <span className="text-slate-400">健康评分</span>
-                                        <span className={s.score < 60 ? "text-rose-500" : s.score < 90 ? "text-amber-500" : "text-emerald-600"}>{s.score}%</span>
+                                        <span className={isDisabled ? "text-slate-400" : s.score < 60 ? "text-rose-500" : s.score < 90 ? "text-amber-500" : "text-emerald-600"}>{isDisabled ? '—' : `${s.score}%`}</span>
                                     </div>
                                     <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
                                         <div
-                                            className={`h-full rounded-full transition-all duration-1000 ${s.score < 60 ? 'bg-rose-500' : s.score < 90 ? 'bg-amber-500' : 'bg-emerald-500'}`}
+                                            className={`h-full rounded-full transition-all duration-1000 ${isDisabled ? 'bg-slate-300' : s.score < 60 ? 'bg-rose-500' : s.score < 90 ? 'bg-amber-500' : 'bg-emerald-500'}`}
                                             style={{ width: `${s.score}%` }}
                                         />
                                     </div>

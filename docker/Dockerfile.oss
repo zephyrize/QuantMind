@@ -27,7 +27,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_INDEX_URL=${PIP_INDEX_URL} \
     PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST} \
     PYTHONPATH=/app \
-    SERVICE_MODE=all
+    SERVICE_MODE=all \
+    QUANTMIND_RUNTIME=docker
 
 WORKDIR /app
 
@@ -117,7 +118,14 @@ COPY docker/training/train.py /app/train.py
 # 复制源代码
 COPY backend backend
 COPY config config
+COPY scripts scripts
 COPY strategy_templates strategy_templates
+# 这些模块由 Engine 的可选路由直接使用；把它们放入镜像，避免 Compose
+# 运行时再以宿主机源码卷覆盖镜像内容。
+COPY alphaagent alphaagent
+COPY TradingAgents-astock TradingAgents-astock
+RUN python -m pip install --no-cache-dir --root-user-action=ignore \
+      -e /app/TradingAgents-astock "starlette<1.0.0"
 
 # 创建数据目录 & Qlib 符号链接（运行时由 rd_loop_wrapper 按实际缓存路径创建）
 RUN mkdir -p /data/models /data/qlib_data /data/uploads /data/strategies /tmp \

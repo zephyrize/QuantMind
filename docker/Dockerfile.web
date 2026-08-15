@@ -23,9 +23,12 @@ FROM nginx:1.25-alpine
 # Remove the default server block that conflicts with our nginx.conf
 RUN rm -f /etc/nginx/conf.d/default.conf
 
-COPY docker/web/nginx.conf /etc/nginx/nginx.conf
+COPY docker/web/nginx.conf /etc/nginx/nginx.conf.template
 COPY --from=builder /app/electron/dist-react /usr/share/nginx/html
 
 EXPOSE 80
 
-CMD ["nginx", "-g", "daemon off;"]
+# 只替换 WEB_API_UPSTREAM，保留 Nginx 自身的 $uri、$host 等变量。
+# 默认适用于完整容器化；场景 2 用 host.docker.internal:8000 覆盖。
+ENV WEB_API_UPSTREAM=quantmind:8000
+CMD ["/bin/sh", "-c", "envsubst '$WEB_API_UPSTREAM' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && exec nginx -g 'daemon off;'"]

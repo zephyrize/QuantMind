@@ -22,6 +22,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from backend.shared.host_paths import (
+    join_host_project_path,
+    resolve_host_project_path,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -285,9 +290,15 @@ class AlphaAgentLauncher:
         in_container = Path("/app/alphaagent/scenarios/qlib/experiment/factor_data_template")
         if in_container.exists():
             return str(in_container)
-        project = os.getenv("HOST_PROJECT_PATH", "/opt/quantmind")
-        template = Path(project) / "alphaagent" / "scenarios" / "qlib" / "experiment" / "factor_data_template"
-        return str(template)
+        project = resolve_host_project_path()
+        return join_host_project_path(
+            project,
+            "alphaagent",
+            "scenarios",
+            "qlib",
+            "experiment",
+            "factor_data_template",
+        )
 
     async def _run_evolution(
         self,

@@ -214,7 +214,7 @@ class StrategyStorageService:
 
     def _has_cos_key_column(self, session) -> bool:
         """兼容旧库：运行时探测 strategies.cos_key 是否存在并缓存。"""
-        if self._has_cos_key_col is not None:
+        if getattr(self, "_has_cos_key_col", None) is not None:
             return self._has_cos_key_col
         try:
             exists = session.execute(text("""
@@ -236,8 +236,8 @@ class StrategyStorageService:
             return
         try:
             self._cos = TencentCOSService()
-            if not self._cos.client:
-                logger.warning("COS client not initialized (missing credentials), falling back to local mode")
+            if not self._cos.is_connected():
+                logger.warning("Object storage is unavailable, falling back to database-only mode")
                 self._cos = None
         except Exception as e:
             logger.warning(f"COS service init failed: {e}")
@@ -281,6 +281,14 @@ class StrategyStorageService:
         if self._local_mode:
             raise RuntimeError("COS 未初始化，无法下载策略")
         try:
+            # OSS local storage exposes the same object operations without a
+            # cloud SDK client. Keep the COS branch for deployments that use it.
+            get_text = getattr(self._cos, "get_object_text", None)
+            if callable(get_text):
+                content = get_text(cos_key)
+                if content is None:
+                    raise FileNotFoundError(cos_key)
+                return content
             resp = self._cos.client.get_object(  # type: ignore[union-attr]
                 Bucket=self._cos.bucket_name,
                 Key=cos_key,
@@ -416,7 +424,17 @@ class StrategyStorageService:
             except Exception as e:
                 logger.error(f"COS 上传失败: {e}")
 
-        db_id = self._db_upsert(user_id, strategy_id, name, code, cos_key, cos_url, file_size, hash_val, metadata)
+        db_id = self._db_upsert(
+            user_id=user_id,
+            strategy_id=strategy_id,
+            name=name,
+            code=code,
+            cos_key=cos_key,
+            cos_url=cos_url,
+            file_size=file_size,
+            hash_val=hash_val,
+            metadata=metadata,
+        )
         return {"id": db_id, "cos_key": cos_key, "cos_url": cos_url, "code_hash": hash_val, "file_size": file_size}
 
     async def get(
@@ -543,11 +561,11 @@ class StrategyStorageService:
 
         # 3. 从 DB 删除
         with get_db() as session:
-            session.execute(
+            result = session.execute(
                 text("DELETE FROM strategies WHERE id = :sid AND user_id = :uid"),
-                {"sid": int(strategy_id), "uid": user_id}
+                {"sid": int(strategy_id), "uid": user_id},
             )
-        return True
+        return bool((result.rowcount or 0) > 0)
 
     def list(
         self,
@@ -556,7 +574,11 @@ class StrategyStorageService:
         search: str | None = None,
         tags: builtins.list[str] | None = None,
     ) -> builtins.list[dict[str, Any]]:
-        # user_id is already a string (e.g., 'admin'), use directly
+        try:
+            uid = _ensure_int_user_id(user_id)
+        except ValueError:
+            return []
+
         with get_db() as session:
             has_cos_key = self._has_cos_key_column(session)
             cos_key_expr = "cos_key" if has_cos_key else "NULL::text as cos_key"
@@ -565,14 +587,15 @@ class StrategyStorageService:
                        code_hash, tags, is_verified, execution_config, created_at, updated_at
                 FROM strategies WHERE user_id = :uid AND status != '{_STATUS_ARCHIVED}'
             """
-            rows = session.execute(text(sql), {"uid": user_id}).fetchall()
+            rows = session.execute(text(sql), {"uid": uid}).fetchall()
             return [
                 {
                     "id": str(r[0]),
                     "name": r[1],
                     "description": r[2],
                     "status": r[3],
-                    "cos_url": r[4],
+                    "cos_url": self._get_presigned_url(r[5]) or r[4],
+                    "cos_key": r[5],
                     "is_verified": bool(r[8]),
                     "execution_config": r[9] or {},
                     "tags": _parse_tags(r[7]),

@@ -1,5 +1,7 @@
 # Git & VS Code
 .git
+.env
+backend/.env
 .gitignore
 .vscode
 .idea
@@ -76,9 +78,7 @@ AGENTS.md
 
 # Large non-essential directories
 models/
-alphaagent/
 go-stock/
-TradingAgents-astock/
 dexter-finance/
 tools/
 openbb-cn/

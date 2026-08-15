@@ -24,6 +24,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from backend.shared.host_paths import (
+    join_host_project_path,
+    resolve_host_project_path,
+)
 from backend.services.engine.quantbot.task_store import QuantBotTaskStore
 
 logger = logging.getLogger(__name__)
@@ -146,23 +150,30 @@ class RDAgentLauncher:
 
     DOCKER_IMAGE = os.getenv("RD_AGENT_DOCKER_IMAGE", "quantmind-rdagent:latest")
     DOCKER_NETWORK = os.getenv("RD_AGENT_DOCKER_NETWORK", "quantmind_quantmind-net")
-    HOST_PROJECT_PATH = os.getenv("HOST_PROJECT_PATH", "/opt/quantmind")
     QLIB_PROVIDER_URI = os.getenv("QLIB_PROVIDER_URI", "/app/db/qlib_data/cn_data")
-
-    # RD-Agent 因子数据模板路径（daily_pv_all.h5 / daily_pv_debug.h5 所在目录）
-    _FACTOR_DATA_TEMPLATE_DIR = (
-        Path(HOST_PROJECT_PATH)
-        / "rd-agent"
-        / "rdagent"
-        / "scenarios"
-        / "qlib"
-        / "experiment"
-        / "factor_data_template"
-    )
 
     def __init__(self):
         self.task_store = QuantBotTaskStore()
         self._running_tasks: dict[str, asyncio.Task] = {}
+
+    @staticmethod
+    def _local_factor_data_template_dir() -> Path:
+        """Return a path this process can read for subprocess fallback mode."""
+
+        in_container = Path(
+            "/app/rd-agent/rdagent/scenarios/qlib/experiment/factor_data_template"
+        )
+        if in_container.exists():
+            return in_container
+        return (
+            Path(__file__).resolve().parents[4]
+            / "rd-agent"
+            / "rdagent"
+            / "scenarios"
+            / "qlib"
+            / "experiment"
+            / "factor_data_template"
+        )
 
     async def launch_evolution(
         self,
@@ -307,26 +318,34 @@ class RDAgentLauncher:
             "DATABASE_URL": os.getenv("DATABASE_URL", ""),
         }
 
-        host = self.HOST_PROJECT_PATH.rstrip("/")
+        host = resolve_host_project_path(client)
         # 共享日志目录：rdagent 容器写入，quantmind 容器读取
-        log_dir_host = f"{host}/data/rdagent_logs"
+        log_dir_host = join_host_project_path(host, "data", "rdagent_logs")
         log_dir_container = "/tmp/rdagent_logs"
         volumes = {
-            f"{host}/backend": {"bind": "/app/backend", "mode": "ro"},
-            f"{host}/scripts": {"bind": "/app/scripts", "mode": "ro"},
-            f"{host}/config":  {"bind": "/app/config",  "mode": "ro"},
-            f"{host}/db":      {"bind": "/app/db",      "mode": "ro"},
+            join_host_project_path(host, "backend"): {"bind": "/app/backend", "mode": "ro"},
+            join_host_project_path(host, "scripts"): {"bind": "/app/scripts", "mode": "ro"},
+            join_host_project_path(host, "config"): {"bind": "/app/config", "mode": "ro"},
+            join_host_project_path(host, "db"): {"bind": "/app/db", "mode": "ro"},
             log_dir_host:      {"bind": log_dir_container, "mode": "rw"},
             seed_host: {"bind": seed_mount, "mode": "ro"},
         }
 
         # daily_pv.h5 已在镜像构建时预置到 git_ignore_folder/factor_implementation_source_data/
         # 如果镜像没有预置数据（旧镜像），从宿主机挂载并复制
-        template_dir = self._FACTOR_DATA_TEMPLATE_DIR
-        if template_dir.exists():
-            volumes[str(template_dir / "daily_pv_all.h5")] = {
-                "bind": "/app/rdagent_factor_data_fallback/daily_pv.h5", "mode": "ro",
-            }
+        template_file = join_host_project_path(
+            host,
+            "rd-agent",
+            "rdagent",
+            "scenarios",
+            "qlib",
+            "experiment",
+            "factor_data_template",
+            "daily_pv_all.h5",
+        )
+        volumes[template_file] = {
+            "bind": "/app/rdagent_factor_data_fallback/daily_pv.h5", "mode": "ro",
+        }
 
         # 确保数据文件在因子执行工作目录下
         data_setup_cmd = (
@@ -469,7 +488,7 @@ class RDAgentLauncher:
         data_dir = Path("/tmp/git_ignore_folder/factor_implementation_source_data")
         data_dir.mkdir(parents=True, exist_ok=True)
         dst = data_dir / "daily_pv.h5"
-        src = self._FACTOR_DATA_TEMPLATE_DIR / "daily_pv_all.h5"
+        src = self._local_factor_data_template_dir() / "daily_pv_all.h5"
         if src.exists() and not dst.exists():
             shutil.copy(str(src), str(dst))
 

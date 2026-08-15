@@ -260,12 +260,19 @@ const LoginPage: React.FC = () => {
       return;
     }
 
-    // 仅在 Electron 桌面端补 :8000（直连后端）；
-    // Web 浏览器模式必须经 Nginx 代理（默认 :3080）以避免后端 CORS 拦截。
     const isRealElectron =
       typeof navigator !== 'undefined' && /Electron\//i.test(navigator.userAgent || '');
-    const port = isRealElectron ? 8000 : 3080;
-    const fullUrl = `http://${ip}:${port}`;
+    const usesCurrentViteDevServer =
+      Boolean((import.meta as any).env?.DEV) &&
+      typeof window !== 'undefined' &&
+      ip === window.location.hostname;
+    // In browser development, use Vite's same-origin proxy for the current host.
+    // A packaged Electron app still connects directly to its local API on :8000.
+    const fullUrl = isRealElectron
+      ? `http://${ip}:8000`
+      : usesCurrentViteDevServer
+        ? window.location.origin
+        : `http://${ip}:3080`;
 
     setConfigLoading(true);
     try {

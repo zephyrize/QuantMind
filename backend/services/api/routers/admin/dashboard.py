@@ -22,6 +22,19 @@ router = APIRouter(
 logger = logging.getLogger(__name__)
 
 
+def _dashboard_host(override_name: str, runtime_name: str, fallback: str) -> str:
+    """Use the same endpoint as the running service unless explicitly overridden."""
+    return (
+        os.getenv(override_name)
+        or os.getenv(runtime_name)
+        or fallback
+    ).strip()
+
+
+def _is_enabled(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 # ---------- Schemas (内联定义，避免额外文件) ----------
 
 
@@ -44,14 +57,14 @@ CORE_SERVICE_HEALTH_URLS = {
 INFRA_SERVICES = [
     {
         "service": "postgres",
-        "host": os.getenv("ADMIN_DASHBOARD_DB_HOST", "quantmind-db"),
-        "port": int(os.getenv("ADMIN_DASHBOARD_DB_PORT", "5432")),
+        "host": _dashboard_host("ADMIN_DASHBOARD_DB_HOST", "DB_HOST", "quantmind-db"),
+        "port": int(os.getenv("ADMIN_DASHBOARD_DB_PORT") or os.getenv("DB_PORT", "5432")),
         "desc": "PostgreSQL 数据库",
     },
     {
         "service": "redis",
-        "host": os.getenv("ADMIN_DASHBOARD_REDIS_HOST", "quantmind-redis"),
-        "port": int(os.getenv("ADMIN_DASHBOARD_REDIS_PORT", "6379")),
+        "host": _dashboard_host("ADMIN_DASHBOARD_REDIS_HOST", "REDIS_HOST", "quantmind-redis"),
+        "port": int(os.getenv("ADMIN_DASHBOARD_REDIS_PORT") or os.getenv("REDIS_PORT", "6379")),
         "desc": "Redis 缓存/队列",
     },
     {
@@ -59,36 +72,42 @@ INFRA_SERVICES = [
         "host": os.getenv("ADMIN_DASHBOARD_DATA_GATEWAY_HOST", "quantmind-data-gateway"),
         "port": int(os.getenv("ADMIN_DASHBOARD_DATA_GATEWAY_PORT", "8004")),
         "desc": "数据网关 (8004)",
+        "enabled_env": "ADMIN_DASHBOARD_DATA_GATEWAY_ENABLED",
     },
     {
         "service": "web",
         "host": os.getenv("ADMIN_DASHBOARD_WEB_HOST", "quantmind-web"),
         "port": int(os.getenv("ADMIN_DASHBOARD_WEB_PORT", "80")),
         "desc": "Nginx 前端 (80/3080)",
+        "enabled_env": "ADMIN_DASHBOARD_WEB_ENABLED",
     },
     {
         "service": "qwenpaw",
         "host": os.getenv("ADMIN_DASHBOARD_QWENPAW_HOST", "qwenpaw"),
         "port": int(os.getenv("ADMIN_DASHBOARD_QWENPAW_PORT", "8088")),
         "desc": "QwenPaw AI 助手 (8089)",
+        "enabled_env": "ADMIN_DASHBOARD_QWENPAW_ENABLED",
     },
     {
         "service": "rsshub",
         "host": os.getenv("ADMIN_DASHBOARD_RSSHUB_HOST", "quantmind-rsshub"),
         "port": int(os.getenv("ADMIN_DASHBOARD_RSSHUB_PORT", "1200")),
         "desc": "RSSHub 订阅源 (1200)",
+        "enabled_env": "ADMIN_DASHBOARD_RSSHUB_ENABLED",
     },
     {
         "service": "huntly",
         "host": os.getenv("ADMIN_DASHBOARD_HUNTLY_HOST", "quantmind-huntly"),
         "port": int(os.getenv("ADMIN_DASHBOARD_HUNTLY_PORT", "80")),
         "desc": "Huntly RSS 阅读器 (8090)",
+        "enabled_env": "ADMIN_DASHBOARD_HUNTLY_ENABLED",
     },
     {
         "service": "dashboard",
         "host": os.getenv("ADMIN_DASHBOARD_DASHBOARD_HOST", "quantmind-dashboard"),
         "port": int(os.getenv("ADMIN_DASHBOARD_DASHBOARD_PORT", "8501")),
         "desc": "Streamlit 数据看板 (8501)",
+        "enabled_env": "ADMIN_DASHBOARD_DASHBOARD_ENABLED",
     },
 ]
 
@@ -99,8 +118,13 @@ def _build_system_metrics(
     services: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """构造系统指标，基于真实健康检查结果。"""
-    overall_status = "healthy" if services and all(service.get("status") == "healthy" for service in services) else "degraded"
-    if not services:
+    monitored = [service for service in services if service.get("enabled", True)]
+    overall_status = (
+        "healthy"
+        if monitored and all(service.get("status") == "healthy" for service in monitored)
+        else "degraded"
+    )
+    if not monitored:
         overall_status = "degraded"
 
     return {
@@ -151,6 +175,18 @@ async def _fetch_tcp_service_health(service: dict[str, Any]) -> dict[str, Any]:
     host = service.get("host", "127.0.0.1")
     port = int(service.get("port", 0))
     name = service.get("service", "unknown")
+    enabled_env = service.get("enabled_env")
+    if enabled_env and not _is_enabled(os.getenv(enabled_env)):
+        return {
+            "service": name,
+            "host": host,
+            "port": port,
+            "status": "disabled",
+            "score": 0,
+            "healthy": False,
+            "enabled": False,
+            "desc": service.get("desc", ""),
+        }
     try:
         loop = asyncio.get_running_loop()
         conn = await asyncio.wait_for(
@@ -165,6 +201,7 @@ async def _fetch_tcp_service_health(service: dict[str, Any]) -> dict[str, Any]:
             "status": "healthy",
             "score": 100,
             "healthy": True,
+            "enabled": True,
             "desc": service.get("desc", ""),
         }
     except Exception as exc:
@@ -176,6 +213,7 @@ async def _fetch_tcp_service_health(service: dict[str, Any]) -> dict[str, Any]:
             "status": "unreachable",
             "score": 0,
             "healthy": False,
+            "enabled": True,
             "desc": service.get("desc", ""),
             "error": str(exc),
         }
@@ -186,11 +224,31 @@ async def _fetch_celery_health(service_name: str, redis_db: int = 3) -> dict[str
 
     celery 容器与 quantmind 共享网络、无独立监听端口，故以 Redis 注册信息为准。
     """
+    if service_name == "celery_beat" and not _is_enabled(
+        os.getenv("ADMIN_DASHBOARD_CELERY_BEAT_ENABLED")
+    ):
+        return {
+            "service": service_name,
+            "status": "disabled",
+            "score": 0,
+            "healthy": False,
+            "enabled": False,
+            "desc": "Celery Beat 定时调度",
+        }
+
     try:
         import redis as _redis
 
-        client = _redis.from_url(
-            os.getenv("REDIS_URL", "redis://quantmind-redis:6379"),
+        client = _redis.Redis(
+            host=_dashboard_host(
+                "ADMIN_DASHBOARD_REDIS_HOST", "REDIS_HOST", "quantmind-redis"
+            ),
+            port=int(
+                os.getenv("ADMIN_DASHBOARD_REDIS_PORT")
+                or os.getenv("REDIS_PORT", "6379")
+            ),
+            username=os.getenv("REDIS_USERNAME") or None,
+            password=os.getenv("REDIS_PASSWORD") or None,
             socket_timeout=2,
             db=redis_db,
         )
@@ -203,6 +261,7 @@ async def _fetch_celery_health(service_name: str, redis_db: int = 3) -> dict[str
             "status": "healthy" if alive else "degraded",
             "score": 100 if alive else 60,
             "healthy": alive,
+            "enabled": True,
             "desc": "Celery Worker 异步任务" if service_name == "celery" else "Celery Beat 定时调度",
         }
     except Exception as exc:
@@ -212,6 +271,7 @@ async def _fetch_celery_health(service_name: str, redis_db: int = 3) -> dict[str
             "status": "unreachable",
             "score": 0,
             "healthy": False,
+            "enabled": True,
             "desc": "Celery Worker 异步任务" if service_name == "celery" else "Celery Beat 定时调度",
             "error": str(exc),
         }
@@ -243,7 +303,10 @@ async def _collect_system_health() -> tuple[int, list[dict[str, Any]]]:
     )
     services = list(http_services) + list(infra_services) + list(celery_services)
 
-    score = round(sum(service.get("score", 0) for service in services) / max(len(services), 1))
+    monitored = [service for service in services if service.get("enabled", True)]
+    score = round(
+        sum(service.get("score", 0) for service in monitored) / max(len(monitored), 1)
+    )
     return score, services
 
 

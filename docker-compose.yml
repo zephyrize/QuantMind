@@ -9,11 +9,8 @@ services:
     image: postgres:15-alpine
     container_name: quantmind-db
     shm_size: 256mb
-    environment:
-      - POSTGRES_DB=${DB_NAME:-quantmind}
-      - POSTGRES_USER=${DB_USER:-quantmind}
-      - POSTGRES_PASSWORD=${DB_PASSWORD:-quantmind2026}
-      - TZ=Asia/Shanghai
+    env_file:
+      - ./.env
     volumes:
       - postgres-data:/var/lib/postgresql/data
       # 首次创建数据库时自动初始化所有表结构（PostgreSQL 官方镜像支持 /docker-entrypoint-initdb.d/）
@@ -25,7 +22,7 @@ services:
       retries: 5
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     networks:
       - quantmind-net
 
@@ -33,13 +30,16 @@ services:
   redis:
     image: redis:7-alpine
     container_name: quantmind-redis
+    env_file:
+      - ./.env
     ports:
-      - "6379:6379"
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru --databases 16 --bind 0.0.0.0
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    command: >-
+      sh -c 'exec redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru --databases 16 --bind 0.0.0.0 --requirepass "$$REDIS_PASSWORD"'
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", 'redis-cli --no-auth-warning -a "$$REDIS_PASSWORD" ping']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -55,18 +55,20 @@ services:
       dockerfile: docker/Dockerfile.oss
       args:
         TORCH_DEVICE: ${TORCH_DEVICE:-cpu}
-        TORCH_CPU_INDEX_URL: ${TORCH_CPU_INDEX_URL:-https://mirrors.aliyun.com/pytorch-wheels/cpu}
+        # 阿里云镜像未同步 torch==2.9.1+cpu；默认使用 PyTorch 官方 CPU 索引。
+        # 私有镜像/离线 wheel 场景仍可通过根 .env 的 TORCH_CPU_INDEX_URL 覆盖。
+        TORCH_CPU_INDEX_URL: ${TORCH_CPU_INDEX_URL:-https://download.pytorch.org/whl/cpu}
         TORCH_GPU_INDEX_URL: ${TORCH_GPU_INDEX_URL:-https://download.pytorch.org/whl/cu128}
     platform: linux/amd64
     # GPU 可选：无 NVIDIA 驱动的主机请保持注释。
     # 有 GPU 加速训练需求时取消注释（需安装 nvidia-container-toolkit）。
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    #deploy:
+    #  resources:
+    #    reservations:
+    #      devices:
+    #        - driver: nvidia
+    #          count: 1
+    #          capabilities: [gpu]
     container_name: quantmind
     depends_on:
       db:
@@ -78,187 +80,13 @@ services:
       - "8001:8001"  # Engine (Qlib回测)
       - "8002:8002"  # Trade (交易服务)
       - "8003:8003"  # Stream (实时行情)
+    env_file:
+      - ./.env
+      - ./backend/.env
     environment:
-      # 应用配置
-      - APP_EDITION=oss
-      - APP_ENV=production
-      - SERVICE_MODE=all
-      - TZ=Asia/Shanghai
+      - QUANTMIND_RUNTIME=docker
       - PYTHONPATH=/app
-      - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/opt/quantmind}
-
-      # 安全配置
-      - SECRET_KEY=${SECRET_KEY:-changeme-generate-a-random-secret}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-changeme-generate-a-random-secret}
-
-      # 数据库配置
-      - DB_DRIVER=asyncpg
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_NAME=${DB_NAME:-quantmind}
-      - DB_USER=${DB_USER:-quantmind}
-      - DB_PASSWORD=${DB_PASSWORD:-quantmind2026}
-      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-quantmind}:${DB_PASSWORD:-quantmind2026}@db:5432/${DB_NAME:-quantmind}
-
-      # 远程数据源配置（用于从官方数据库拉取增量数据）
-      - SOURCE_DATABASE_URL=${SOURCE_DATABASE_URL:-postgresql://user:pass@localhost:5432/quantmind}
-
-      # Redis 配置
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=
-
-      # 存储配置 (本地存储)
-      - STORAGE_MODE=local
-      - STORAGE_ROOT=/data
-
-      # 训练期间资源保护：训练开始时 stop 非保护容器以释放内存，结束后自动恢复。
-      # 受保护前缀（按容器名前缀匹配，不会被停止）：quantmind* 和 qm-train-* 自身，
-      # 加上 ragflow 套件依赖的基础设施（redis/mysql/es/minio）。
-      - TRAINING_PAUSE_OTHERS=true
-      - TRAINING_PROTECTED_NAME_PREFIXES=quantmind,qm-train-,docker-redis-,docker-mysql-,docker-es01-,docker-minio-
-
-      # 融资融券股票池文件路径（容器内）
-      - MARGIN_STOCK_POOL_PATH=/data/融资融券.json
-
-      # 服务端口
-      - API_PORT=8000
-      - ENGINE_PORT=8001
-      - TRADE_PORT=8002
-      - STREAM_PORT=8003
-
-      # 服务 Workers 配置
-      # AI-IDE 执行日志状态当前保存在 engine worker 进程内存中，
-      # OSS 部署需保持单 worker，避免 /start 与 /execute/logs/{job_id}
-      # 落到不同 worker 时出现 "Job not found"。
-      - API_WORKERS=1
-      - ENGINE_WORKERS=${ENGINE_WORKERS:-1}
-      - TRADE_WORKERS=1
-      - STREAM_WORKERS=1
-
-      # 服务间通信 (OSS单镜像模式使用localhost)
-      - TRADE_SERVICE_URL=http://127.0.0.1:8002
-      - ENGINE_SERVICE_URL=http://127.0.0.1:8001
-      - AI_IDE_SERVICE_URL=http://127.0.0.1:8001
-      - STREAM_SERVICE_URL=http://127.0.0.1:8003
-      - MARKET_DATA_SERVICE_URL=http://127.0.0.1:8003
-      - STRATEGY_SERVICE_URL=http://127.0.0.1:8001
-      - PORTFOLIO_SERVICE_URL=http://127.0.0.1:8002
-      - USER_SERVICE_URL=http://127.0.0.1:8002
-      - REAL_TRADING_SERVICE_URL=http://127.0.0.1:8002
-
-      # 调试配置
-      - DEBUG=false
-      - LOG_LEVEL=INFO
-
-      # 策略模板目录
-      - STRATEGY_TEMPLATES_DIR=/app/strategy_templates
-
-      # 回测结果存储目录（使用共享卷）
-      - QLIB_BACKTEST_RESULT_DIR=/data/backtest_results
-      - QLIB_BACKTEST_KERNELS=1
-
-      # 本地 Docker 训练编排（模型训练）
-      - INTERNAL_CALL_SECRET=${INTERNAL_CALL_SECRET:-changeme-internal-secret}
-      - TRAINING_IMAGE=${TRAINING_IMAGE:-quantmind-oss:latest}
-      - TRAINING_DOCKER_NETWORK=${TRAINING_DOCKER_NETWORK:-quantmind_quantmind-net}
-      - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/opt/quantmind}
-      - QUANTMIND_API_BASE_URL=${QUANTMIND_API_BASE_URL:-http://quantmind:8000}
-
-      # AutoDL 远程训练节点
-      - TRAINING_AUTODL_HOST=${TRAINING_AUTODL_HOST:-}
-      - TRAINING_AUTODL_SSH_PORT=${TRAINING_AUTODL_SSH_PORT:-22}
-      - TRAINING_AUTODL_USER=${TRAINING_AUTODL_USER:-root}
-      - TRAINING_AUTODL_SSH_PASSWORD=${TRAINING_AUTODL_SSH_PASSWORD:-}
-      - TRAINING_AUTODL_SSH_KEY=${TRAINING_AUTODL_SSH_KEY:-}
-      - TRAINING_AUTODL_WORK_DIR=${TRAINING_AUTODL_WORK_DIR:-/workspace}
-      - TRAINING_AUTODL_DOCKER_IMAGE=${TRAINING_AUTODL_DOCKER_IMAGE:-quantmind-oss:latest}
-      - TRAINING_AUTODL_NODE_NAME=${TRAINING_AUTODL_NODE_NAME:-AutoDL GPU}
-      - TRAINING_AUTODL_GPUS=${TRAINING_AUTODL_GPUS:-all}
-      - TRAINING_MASTER_HOST=${TRAINING_MASTER_HOST:-}
-
-      # Qwen/DashScope API (用于 AI 策略功能)
-      # 使用 mock key 允许服务启动，用户需在个人中心配置真实 API key
-      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-mock-api-key-not-configured}
-      - QWEN_API_KEY=${QWEN_API_KEY:-mock-api-key-not-configured}
-      # DeepSeek API (用于 TradingAgents 等)
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-your-deepseek-api-key}
-      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
-      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
-      # 选股意图解析复用 AI_IDE LLM 配置（OpenAI 兼容）
-      - AI_IDE_LLM_API_KEY=${AI_IDE_LLM_API_KEY:-mock-api-key-not-configured}
-      - AI_IDE_LLM_BASE_URL=${AI_IDE_LLM_BASE_URL:-https://token-plan-cn.xiaomimimo.com/v1}
-
-      # AI-IDE Chat LLM 配置（OpenAI 兼容；默认 MiMo）
-      - AI_IDE_LLM_BASE_URL=${AI_IDE_LLM_BASE_URL:-https://token-plan-cn.xiaomimimo.com/v1}
-      - AI_IDE_LLM_MODEL=${AI_IDE_LLM_MODEL:-mimo-v2.5-pro}
-      - AI_IDE_LLM_API_KEY=${AI_IDE_LLM_API_KEY:-mock-api-key-not-configured}
-
-      # RD-Agent / AlphaAgent 使用 OpenAI 兼容 API（复用 AI_IDE 配置）
-      # 模型名称由 .env 的 AI_IDE_LLM_MODEL 决定；默认 mimo-v2.5-pro
-      - CHAT_MODEL=${AI_IDE_LLM_MODEL:-mimo-v2.5-pro}
-      # AlphaAgent reasoning_flag 默认 True → 用 reasoning_model；
-      # 如果为空则发 model="" 导致 400。镜像 CHAT_MODEL 即可。
-      - REASONING_MODEL=${AI_IDE_LLM_MODEL:-mimo-v2.5-pro}
-      # 关闭 streaming — reasoning 模型的 reasoning_content chunk 导致 OpenAI SDK JSON 解析失败
-      - CHAT_STREAM=false
-      - OPENAI_API_KEY=${AI_IDE_LLM_API_KEY:-mock-api-key-not-configured}
-      - OPENAI_API_BASE=${AI_IDE_LLM_BASE_URL:-https://token-plan-cn.xiaomimimo.com/v1}
-      # AlphaAgent LLM 重试配置（502/429 等临时错误需更多重试）
-      - MAX_RETRY=30
-      - RETRY_WAIT_SECONDS=5
-      # AlphaAgent reads OPENAI_BASE_URL (modern SDK convention); duplicate
-      # OPENAI_API_BASE here so its factor-mining subprocess hits the right host.
-      - OPENAI_BASE_URL=${AI_IDE_LLM_BASE_URL:-https://token-plan-cn.xiaomimimo.com/v1}
-
-      # AlphaAgent 因子去重用 embedding；MiMo 不提供 embedding，走硅基流动
-      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-mock-api-key-not-configured}
-      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-https://api.siliconflow.cn/v1}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-m3}
-
-      # QuantDB SDK（付费高质量数据源：K线/Tick/财报/估值/315维AI因子）
-      - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
-      # QuantDB 本地数据中枢（A 股优先数据源）
-      - QM_QUANTDB_DATA_DIR=/data/quantdb
-      # QuantUS / QuantHK 本地数据中枢（美股/港股，Yahoo Finance 摄取）
-      - QM_QUANTUS_DATA_DIR=/data/quantus
-      - QM_QUANTHK_DATA_DIR=/data/quanthk
-      # QuantBC 本地数据中枢（区块链/加密货币，Binance 摄取）
-      - QM_QUANTBC_DATA_DIR=/data/quantbc
-      # QuantFutures 本地数据中枢（期货/贵金属，akshare 摄取）
-      - QM_QUANTFUTURES_DATA_DIR=/data/quantfutures
-      # 生产环境屏蔽区块链（CRYPTO）市场：默认 false 关闭 crypto 适配器，开发可用 ENABLE_CRYPTO=true 开启
-      - ENABLE_CRYPTO=${ENABLE_CRYPTO:-false}
-
-      # AlphaAgent 因子编码专家系统提示词
-      - ALPHA_AGENT_SYSTEM_PROMPT=${ALPHA_AGENT_SYSTEM_PROMPT:-}
-
-      # 市值单位配置：数据库存储单位为元，1亿=100,000,000
-      - AI_STRATEGY_TOTAL_MV_PER_YI=100000000.0
-
-      # QuantBot 代理（QwenPaw 机器人集成）
-      # qwenpaw 容器已加入同一网络，通过 http://qwenpaw:8088 访问
-      - COPAW_BASE_URL=${COPAW_BASE_URL:-http://qwenpaw:8088}
-      - QWENPAW_BASE_URL=${QWENPAW_BASE_URL:-http://qwenpaw:8088}
-      # QwenPaw 上游认证信息（按需配置）
-      - QWENPAW_AUTH_USERNAME=${QWENPAW_AUTH_USERNAME:-}
-      - QWENPAW_AUTH_PASSWORD=${QWENPAW_AUTH_PASSWORD:-}
-      # QwenPaw 共享文件目录
-      - QWENPAW_SHARED_FILES_DIR=/qwenpaw-shared
-
-      # Huntly 资讯聚合 (后端代理调用)
-      - HUNTLY_BASE_URL=${HUNTLY_BASE_URL:-http://quantmind-huntly}
-      - HUNTLY_USERNAME=${HUNTLY_USERNAME:-changeme}
-      - HUNTLY_PASSWORD=${HUNTLY_PASSWORD:-changeme}
-
-      # 数据平台 - 第三方离线数据源根目录
-      - QM_TDX_DIR=${QM_TDX_DIR:-/data/third_party/tdx}
-      - QM_INVESTMENT_DATA_DIR=${QM_INVESTMENT_DATA_DIR:-/data/third_party/investment_data}
-      - QM_SIMONLIN_A_DIR=${QM_SIMONLIN_A_DIR:-/data/third_party/simonlin_a_stock}
     volumes:
-      # Read administrator credentials on each backend process start. This
-      # lets an edited local .env take effect with `docker compose restart`.
-      - ./.env:/app/.env:ro
       # 运行时数据
       - ./data:/data
       # AI 模型文件 (按需下载)
@@ -267,18 +95,6 @@ services:
       - ./db:/app/db
       # 日志
       - ./logs:/app/logs
-      # 后端代码 (外挂载解决热更新问题)
-      - ./backend:/app/backend
-      - ./config:/app/config
-      - ./scripts:/app/scripts
-      # AlphaAgent 包源码（容器内 Python 通过 PYTHONPATH=/app 直接 import）
-      - ./alphaagent:/app/alphaagent
-      # TradingAgents-Astock 多Agent投研框架
-      - ./TradingAgents-astock:/app/TradingAgents-astock
-      # 训练脚本（用于 Docker-in-Docker 启动训练容器）
-      - ./docker/training:/app/docker/training
-      # 策略模板
-      - ./strategy_templates:/app/strategy_templates
       # 用户股票池文件 (AI策略生成)
       - ./user_pools_local:/app/user_pools_local
       # RD-Agent 已 pip install 到镜像中，不再需要运行时挂载
@@ -286,10 +102,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # QwenPaw 共享文件目录
       - qwenpaw-shared:/qwenpaw-shared
-    # 启动时自动安装 TradingAgents（editable install，依赖保留在容器内）
-    command: >
-      sh -c "pip install -e /app/TradingAgents-astock --quiet 2>/dev/null; pip install 'starlette<1.0.0' --quiet 2>/dev/null;
-             python backend/main_oss.py"
     # deploy:
     #   resources:
     #     reservations:
@@ -311,84 +123,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    env_file:
+      - ./.env
+      - ./backend/.env
     environment:
-      # 应用配置
-      - APP_EDITION=oss
-      - APP_ENV=production
-      - TZ=Asia/Shanghai
+      - QUANTMIND_RUNTIME=docker
       - PYTHONPATH=/app
-
-      # 数据库配置
-      - DB_DRIVER=asyncpg
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_NAME=${DB_NAME:-quantmind}
-      - DB_USER=${DB_USER:-quantmind}
-      - DB_PASSWORD=${DB_PASSWORD:-quantmind2026}
-      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-quantmind}:${DB_PASSWORD:-quantmind2026}@db:5432/${DB_NAME:-quantmind}
-
-      # Redis 配置
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=
-
-      # 存储配置
-      - STORAGE_MODE=local
-      - STORAGE_ROOT=/data
-
-      # 融资融券股票池文件路径（容器内）
-      - MARGIN_STOCK_POOL_PATH=/data/融资融券.json
-
-      # 策略模板目录
-      - STRATEGY_TEMPLATES_DIR=/app/strategy_templates
-
-      # 回测结果存储目录（使用共享卷）
-      - QLIB_BACKTEST_RESULT_DIR=/data/backtest_results
-      - QLIB_BACKTEST_KERNELS=1
-
-      # 本地 Docker 训练编排（模型训练）
-      - INTERNAL_CALL_SECRET=${INTERNAL_CALL_SECRET:-changeme-internal-secret}
-      - TRAINING_IMAGE=${TRAINING_IMAGE:-quantmind-oss:latest}
-      - TRAINING_DOCKER_NETWORK=${TRAINING_DOCKER_NETWORK:-quantmind_quantmind-net}
-      - HOST_PROJECT_PATH=${HOST_PROJECT_PATH:-/opt/quantmind}
-      - QUANTMIND_API_BASE_URL=${QUANTMIND_API_BASE_URL:-http://quantmind:8000}
-
-      # AutoDL 远程训练节点
-      - TRAINING_AUTODL_HOST=${TRAINING_AUTODL_HOST:-}
-      - TRAINING_AUTODL_SSH_PORT=${TRAINING_AUTODL_SSH_PORT:-22}
-      - TRAINING_AUTODL_USER=${TRAINING_AUTODL_USER:-root}
-      - TRAINING_AUTODL_SSH_PASSWORD=${TRAINING_AUTODL_SSH_PASSWORD:-}
-      - TRAINING_AUTODL_SSH_KEY=${TRAINING_AUTODL_SSH_KEY:-}
-      - TRAINING_AUTODL_WORK_DIR=${TRAINING_AUTODL_WORK_DIR:-/workspace}
-      - TRAINING_AUTODL_DOCKER_IMAGE=${TRAINING_AUTODL_DOCKER_IMAGE:-quantmind-oss:latest}
-      - TRAINING_AUTODL_NODE_NAME=${TRAINING_AUTODL_NODE_NAME:-AutoDL GPU}
-      - TRAINING_AUTODL_GPUS=${TRAINING_AUTODL_GPUS:-all}
-      - TRAINING_MASTER_HOST=${TRAINING_MASTER_HOST:-}
-
-      # 回测进度回调地址（OSS 模式使用 quantmind 容器名）
-      - BACKTEST_PROGRESS_URL=http://quantmind:8001
-
-      # Qwen/DashScope API (mock key 允许启动，用户需配置真实 key)
-      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-mock-api-key-not-configured}
-      - QWEN_API_KEY=${QWEN_API_KEY:-mock-api-key-not-configured}
-      # DeepSeek API (用于 TradingAgents 等)
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-your-deepseek-api-key}
-      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
-      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
-
-      # AI-IDE Chat LLM 配置（OpenAI 兼容；默认 MiMo）
-      - AI_IDE_LLM_BASE_URL=${AI_IDE_LLM_BASE_URL:-https://token-plan-cn.xiaomimimo.com/v1}
-      - AI_IDE_LLM_MODEL=${AI_IDE_LLM_MODEL:-mimo-v2.5-pro}
-      - AI_IDE_LLM_API_KEY=${AI_IDE_LLM_API_KEY:-mock-api-key-not-configured}
-
-      # QuantDB SDK（数据同步 + 特征快照生成）
-      - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
-      - QM_QUANTDB_DATA_DIR=/data/quantdb
-      # QuantDB 同步状态库（避免容器内空库导致全量重下）
-      - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
-
-      # 数据同步定时任务
-      - DAILY_SYNC_ENABLED=true
     volumes:
       # 运行时数据
       - ./data:/data
@@ -398,12 +138,6 @@ services:
       - ./db:/app/db
       # 日志
       - ./logs:/app/logs
-      # 后端代码
-      - ./backend:/app/backend
-      - ./config:/app/config
-      - ./scripts:/app/scripts
-      # 策略模板
-      - ./strategy_templates:/app/strategy_templates
       # 用户股票池文件 (AI策略生成)
       - ./user_pools_local:/app/user_pools_local
     command: celery -A backend.services.engine.qlib_app.celery_config:celery_app worker -Q ${QLIB_CELERY_QUEUE:-qlib_backtest_srv} --loglevel=info --concurrency=4
@@ -426,41 +160,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    env_file:
+      - ./.env
+      - ./backend/.env
     environment:
-      - APP_EDITION=oss
-      - APP_ENV=production
-      - TZ=Asia/Shanghai
+      - QUANTMIND_RUNTIME=docker
       - PYTHONPATH=/app
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_NAME=${DB_NAME:-quantmind}
-      - DB_USER=${DB_USER:-quantmind}
-      - DB_PASSWORD=${DB_PASSWORD:-quantmind2026}
-      - POSTGRES_HOST=db
-      - POSTGRES_USER=${DB_USER:-quantmind}
-      - POSTGRES_PASSWORD=${DB_PASSWORD:-quantmind2026}
-      - POSTGRES_DB=${DB_NAME:-quantmind}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=
-      - HUNTLY_BASE_URL=http://quantmind-huntly
-      - HUNTLY_USERNAME=${HUNTLY_USERNAME:-changeme}
-      - HUNTLY_PASSWORD=${HUNTLY_PASSWORD:-changeme}
-      - NEWS_ENRICH_ENABLED=true
-      - NEWS_ENRICH_INTERVAL_SEC=60
-      - NEWS_MATCHER_RELOAD_SEC=600
-
-      # QuantDB SDK（数据同步调度需要）
-      - QUANTDB_API_KEY=${QUANTDB_API_KEY:-}
-      - QM_QUANTDB_DATA_DIR=/data/quantdb
-      - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
-
-      # 数据同步定时任务
-      - DAILY_SYNC_ENABLED=true
     volumes:
-      - ./backend:/app/backend
-      - ./config:/app/config
-      - ./scripts:/app/scripts
       - ./logs:/app/logs
       - ./data:/data
       - ./db:/app/db
@@ -485,7 +191,15 @@ services:
       quantmind:
         condition: service_healthy
     ports:
-      - "${WEB_PORT:-3000}:80"
+      - "${WEB_HOST_PORT:-3080}:80"
+    environment:
+      # 默认由同一 Compose 网络中的后端容器提供 API。
+      # 场景 2 可在启动命令中临时设为 host.docker.internal:8000。
+      - WEB_API_UPSTREAM=${WEB_API_UPSTREAM:-quantmind:8000}
+    # Linux Docker 也能以 host.docker.internal 访问宿主机后端；
+    # 场景 1 中该别名不会参与实际请求。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
@@ -591,7 +305,9 @@ services:
       - NODE_ENV=production
       - TZ=Asia/Shanghai
       - CACHE_TYPE=redis
-      - REDIS_URL=redis://redis:6379/3
+      # 默认复用根 .env 的 Redis 密码。若密码包含 @、:、/ 等 URI 保留字符，
+      # 请在根 .env 设置 URL 编码后的 RSSHUB_REDIS_URL 覆盖此默认值。
+      - REDIS_URL=${RSSHUB_REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/3}
       - CACHE_EXPIRE=300
       - CACHE_CONTENT_EXPIRE=3600
       - REQUEST_RETRY=2
@@ -635,7 +351,7 @@ services:
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-quantmind}:${DB_PASSWORD:-quantmind2026}@db:5432/${DB_NAME:-quantmind}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - STORAGE_MODE=local
       - STORAGE_ROOT=/data
       - MARGIN_STOCK_POOL_PATH=/data/融资融券.json

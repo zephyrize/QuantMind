@@ -2,10 +2,12 @@
 AI策略生成服务配置
 """
 
+import logging
 import os
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+logger = logging.getLogger(__name__)
 
 
 class AIStrategyConfig(BaseSettings):
@@ -27,7 +29,8 @@ class AIStrategyConfig(BaseSettings):
     LLM_MODEL: str = os.getenv("QWEN_MODEL", "qwen3.6-plus")
     # 复用 AI_IDE_LLM_API_KEY（全项目统一 LLM 入口），失败再回退 DASHSCOPE/QWEN
     LLM_API_KEY: str = (
-        os.getenv("AI_IDE_LLM_API_KEY")
+        os.getenv("LLM_API_KEY")
+        or os.getenv("AI_IDE_LLM_API_KEY")
         or os.getenv("DASHSCOPE_API_KEY")
         or os.getenv("QWEN_API_KEY", "")
     )
@@ -41,6 +44,11 @@ class AIStrategyConfig(BaseSettings):
     LLM_TEMPERATURE: float = 0.3  # 降低随机性，提高代码质量
     LLM_MAX_TOKENS: int = 4000
     LLM_TIMEOUT: int = 60  # 秒
+    # Set true when AI strategy generation must be available at startup.
+    AI_STRATEGY_LLM_REQUIRED: bool = (
+        os.getenv("AI_STRATEGY_LLM_REQUIRED", "false").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
 
     # ============ DashScope Embedding配置 ============
     DASHSCOPE_EMBEDDING_MODEL: str = os.getenv("DASHSCOPE_EMBEDDING_MODEL", "text-embedding-v4")
@@ -294,16 +302,20 @@ def validate_required_config(config: AIStrategyConfig) -> None:
     Raises:
         ValueError: 当必需配置缺失时
     """
-    required_configs = {
-        "LLM_API_KEY": config.LLM_API_KEY,
-        "DATABASE_URL": config.DATABASE_URL,
-    }
+    required_configs = {"DATABASE_URL": config.DATABASE_URL}
+    if config.AI_STRATEGY_LLM_REQUIRED:
+        required_configs["LLM_API_KEY"] = config.LLM_API_KEY
 
     missing = [key for key, value in required_configs.items() if not value or not value.strip()]
-
     if missing:
-        error_msg = f"缺少必需的配置项: {', '.join(missing)}. 请检查环境变量或.env文件。"
+        error_msg = "缺少必需的配置项: " + ", ".join(missing) + ". 请检查环境变量或.env文件。"
         raise ValueError(error_msg)
+
+    if not config.LLM_API_KEY:
+        logger.warning(
+            "No LLM API key configured; AI strategy generation is disabled until "
+            "LLM_API_KEY, AI_IDE_LLM_API_KEY, DASHSCOPE_API_KEY, or QWEN_API_KEY is set."
+        )
 
     # 验证数据库URL格式
     if config.DATABASE_URL and "password" in config.DATABASE_URL.lower():
