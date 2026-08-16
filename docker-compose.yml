@@ -87,6 +87,8 @@ services:
       - QUANTMIND_RUNTIME=docker
       - PYTHONPATH=/app
     volumes:
+      # 训练编排器会把该宿主机脚本再挂载进训练子容器，以便无需重建镜像即可更新训练逻辑
+      - ./docker:/app/docker:ro
       # 运行时数据
       - ./data:/data
       # AI 模型文件 (按需下载)

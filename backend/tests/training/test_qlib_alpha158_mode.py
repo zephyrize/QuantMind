@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -54,6 +55,27 @@ def test_local_process_mode_does_not_create_a_docker_client(monkeypatch):
     assert orchestrator.execution_mode == "process"
     assert orchestrator.docker is None
     assert orchestrator.api_base == "http://127.0.0.1:8000"
+
+
+def test_optional_daemon_host_path_uses_only_bind_mounts():
+    orchestrator = object.__new__(LocalDockerOrchestrator)
+    orchestrator._self_mounts = [
+        {
+            "Type": "bind",
+            "Source": "/host/project/data",
+            "Destination": "/data",
+        }
+    ]
+
+    assert (
+        orchestrator._optional_daemon_host_path(
+            Path("/app/docker/training/train.py")
+        )
+        is None
+    )
+    assert orchestrator._optional_daemon_host_path(Path("/data/example.txt")) == Path(
+        "/host/project/data/example.txt"
+    )
 
 
 def test_launch_startup_error_is_marked_failed(monkeypatch):

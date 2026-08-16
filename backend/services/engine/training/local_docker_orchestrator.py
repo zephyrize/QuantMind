@@ -169,13 +169,18 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
 
     def _daemon_host_path(self, container_path: Path) -> Path:
         """Return the exact source path the Docker daemon can mount."""
-        source = _resolve_bind_mount_source(container_path, self._get_self_mounts())
+        source = self._optional_daemon_host_path(container_path)
         if source is None:
             raise RuntimeError(
                 f"No bind mount maps {container_path} to a Docker host path. "
                 "Check the quantmind service volumes before starting training."
             )
-        return Path(source)
+        return source
+
+    def _optional_daemon_host_path(self, container_path: Path) -> Path | None:
+        """Return a bind-mounted Docker host path, if the path has one."""
+        source = _resolve_bind_mount_source(container_path, self._get_self_mounts())
+        return Path(source) if source is not None else None
 
     # ── 训练期间资源保护 ──────────────────────────────────────────────────────────
     @staticmethod
@@ -773,7 +778,7 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         else:
             container_local_data_path = Path("/data/feature_snapshots")
         local_data_host_path = self._daemon_host_path(container_local_data_path)
-        training_script_host_path = self._daemon_host_path(
+        training_script_host_path = self._optional_daemon_host_path(
             Path("/app/docker/training/train.py")
         )
         feature_mode = str((config.get("data") or {}).get("feature_mode") or "snapshot")
@@ -877,16 +882,25 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
             local_data_host_path,
             _LOCAL_DATA_MOUNT_DIR,
         )
-        # 始终挂载宿主机 train.py 覆盖镜像内脚本（注意：os.path.exists 在 API 容器内无法感知宿主机路径，固定挂载）
-        volumes[str(training_script_host_path)] = {
-            "bind": "/app/train.py",
-            "mode": "ro",
-        }
-        logger.info(
-            "[%s] Local train.py override mounted: %s -> /app/train.py",
-            run_id,
-            training_script_host_path,
-        )
+        # 开发环境下用宿主机脚本覆盖镜像内置版；生产镜像未挂载源码时，
+        # 直接使用 Dockerfile 已 COPY 的 /app/train.py，不能因此阻止训练启动。
+        if training_script_host_path is not None:
+            volumes[str(training_script_host_path)] = {
+                "bind": "/app/train.py",
+                "mode": "ro",
+            }
+            logger.info(
+                "[%s] Local train.py override mounted: %s -> /app/train.py",
+                run_id,
+                training_script_host_path,
+            )
+        else:
+            logger.warning(
+                "[%s] No bind-mounted local train.py found; using the image-built "
+                "/app/train.py. Rebuild %s after training-script changes.",
+                run_id,
+                _TRAINING_IMAGE,
+            )
         logger.info(
             "[%s] PERSISTENCE Local output mounted: %s (host) -> /workspace (container: %s)",
             run_id,
