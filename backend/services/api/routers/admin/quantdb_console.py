@@ -232,6 +232,10 @@ async def get_catalog(current_user: dict = Depends(require_admin)):
 # ---------------------------------------------------------------------------
 # 数据源勾选配置
 # ---------------------------------------------------------------------------
+class DataSourcesRequest(BaseModel):
+    sources: dict[str, bool] = Field(..., description="数据源勾选状态 {source: enabled}")
+
+
 @router.get("/data-sources")
 async def get_data_sources(current_user: dict = Depends(require_admin)):
     from backend.shared.data_source_config import list_sources
@@ -453,10 +457,6 @@ class SyncDatasetsRequest(BaseModel):
     with_pg: bool = Field(False, description="同步后从 parquet 填充 PG stock_daily_latest")
     with_qlib: bool = Field(False, description="同步后增量重建 Qlib 缓存")
     pg_full: bool = Field(False, description="PG 全量重灌（默认增量）")
-
-
-class DataSourcesRequest(BaseModel):
-    sources: dict[str, bool] = Field(..., description="数据源勾选状态 {source: enabled}")
 
 
 _jobs: dict[str, dict[str, Any]] = {}

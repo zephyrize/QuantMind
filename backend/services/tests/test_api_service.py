@@ -76,6 +76,11 @@ class TestAPIRouterRegistration:
         community_paths = [p for p in paths if "/api/v1/community" in p]
         assert len(community_paths) > 0, f"未找到社区路由，当前路由: {paths}"
 
+    def test_quantdb_data_source_routes_registered(self):
+        """验证 QuantDB 数据源路由可在全新 API 进程中完成类型解析。"""
+        paths = self._get_route_paths()
+        assert "/api/v1/admin/data-platform/quantdb/data-sources" in paths
+
 
 # ============================================================
 # 2. HTTP 接口测试 (使用 TestClient, mock 掉外部依赖)
