@@ -319,6 +319,13 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="Payload must be a JSON object")
 
+    feature_mode = str(payload.get("feature_mode") or "snapshot").strip().lower()
+    if feature_mode not in {"snapshot", "qlib_alpha158"}:
+        raise HTTPException(
+            status_code=422,
+            detail="feature_mode must be one of: snapshot, qlib_alpha158",
+        )
+
     model_type = str(payload.get("model_type", "lightgbm")).strip().lower()
     if model_type not in _ALLOWED_MODEL_TYPES:
         raise HTTPException(
@@ -340,6 +347,18 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
         # 多模型时，model_type 取第一个作为主模型（向后兼容）
         if model_types:
             model_type = model_types[0]
+
+    if feature_mode == "qlib_alpha158":
+        if model_type != "lightgbm" or (model_types and len(model_types) > 1):
+            raise HTTPException(
+                status_code=422,
+                detail="qlib_alpha158 currently supports the native Qlib LightGBM model only",
+            )
+        if str(payload.get("node_id") or "local") != "local":
+            raise HTTPException(
+                status_code=422,
+                detail="qlib_alpha158 currently supports the local training node only",
+            )
 
     ensemble_method = str(payload.get("ensemble", "none")).strip().lower()
     if ensemble_method not in ("none", "stacking", "blending", "voting"):
@@ -399,7 +418,7 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
             features.append(val)
     if len(features) > 300:
         raise HTTPException(status_code=422, detail="features length cannot exceed 300")
-    if allowed_features:
+    if allowed_features and feature_mode == "snapshot":
         allowed_set = set(allowed_features)
         invalid = [feature for feature in features if feature not in allowed_set]
         if invalid:
@@ -480,6 +499,7 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
     normalized: dict[str, Any] = {
         "job_name": str(payload.get("job_name", "unnamed")).strip() or "unnamed",
         "display_name": display_name,
+        "feature_mode": feature_mode,
         "model_type": model_type,
         "train_start": train_start,
         "train_end": train_end,
@@ -895,9 +915,12 @@ async def submit_training_job(
         )
 
     # 预检特征可用性，告知前端哪些特征在 parquet 中不存在
-    valid_features, missing_features = LocalDockerOrchestrator._filter_features_by_parquet(
-        run_id, normalized_payload.get("features", [])
-    )
+    if normalized_payload.get("feature_mode") == "qlib_alpha158":
+        valid_features, missing_features = [], []
+    else:
+        valid_features, missing_features = LocalDockerOrchestrator._filter_features_by_parquet(
+            run_id, normalized_payload.get("features", [])
+        )
 
     return {
         "runId": run_id,

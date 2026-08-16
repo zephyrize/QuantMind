@@ -176,10 +176,13 @@ export interface PsiDriftResult {
   reason?: string;
 }
 
+export type FeatureMode = "snapshot" | "qlib_alpha158";
+
 export interface TrainingRequestPayload {
   displayName: string;
   selectedFeatures: string[];
   featureCategories: string[];
+  featureMode: FeatureMode;
   target: TrainingTarget;
   timePeriods: {
     train: [string, string];
@@ -255,6 +258,7 @@ export interface TrainingDraft {
   displayName: string;
   displayNameMode: 'auto' | 'manual';
   selectedFeatures: string[];
+  featureMode?: FeatureMode;
   timePeriods: {
     train: [string, string];
     val: [string, string];
@@ -783,8 +787,9 @@ export const buildTrainingRequest = (
   displayName: string,
   market?: string,
   wfa?: WfaConfig,
+  featureMode: FeatureMode = "snapshot",
 ): TrainingRequestPayload => {
-  const finalFeatures = Array.from(new Set(selectedFeatures));
+  const finalFeatures = featureMode === "qlib_alpha158" ? [] : Array.from(new Set(selectedFeatures));
   const labelFormula = buildLabelFormula(target);
   const effectiveTradeDate = buildEffectiveTradeDate(target, timePeriods.test[0]);
   const trainingWindow = `${formatRange(timePeriods.train)} | ${formatRange(timePeriods.val)} | ${formatRange(timePeriods.test)}`;
@@ -792,7 +797,8 @@ export const buildTrainingRequest = (
   return {
     displayName: displayName.trim() || buildAutoDisplayName(dayjs(), target, finalFeatures.length, undefined, market),
     selectedFeatures: finalFeatures,
-    featureCategories: summarizeFeatureCategories(finalFeatures, categories),
+    featureCategories: featureMode === "qlib_alpha158" ? ["Qlib 原生 Alpha158"] : summarizeFeatureCategories(finalFeatures, categories),
+    featureMode,
     target,
     timePeriods: {
       train: toISOStringRange(timePeriods.train),
@@ -814,7 +820,8 @@ export const buildBackendTrainingPayload = (
   timePeriods: TimePeriodMap,
   options?: { nodeId?: string },
 ): any => {
-  const features = Array.from(new Set(request.selectedFeatures));
+  const isQlibAlpha158 = request.featureMode === "qlib_alpha158";
+  const features = isQlibAlpha158 ? [] : Array.from(new Set(request.selectedFeatures));
   const trainStart = dayjs(request.timePeriods.train[0]).format('YYYY-MM-DD');
   const trainEnd = dayjs(request.timePeriods.train[1]).format('YYYY-MM-DD');
   const validStart = dayjs(request.timePeriods.val[0]).format('YYYY-MM-DD');
@@ -825,14 +832,15 @@ export const buildBackendTrainingPayload = (
   const splitTotal = Math.max(1, daysBetween(timePeriods.train) + daysBetween(timePeriods.val));
   const valRatio = Math.min(0.5, Math.max(0.01, daysBetween(timePeriods.val) / splitTotal));
 
-  const modelType = request.params.model_type || 'lightgbm';
-  const modelTypes = request.params.model_types?.length > 1 ? request.params.model_types : null;
+  const modelType = isQlibAlpha158 ? "lightgbm" : (request.params.model_type || "lightgbm");
+  const modelTypes = isQlibAlpha158 ? null : (request.params.model_types?.length > 1 ? request.params.model_types : null);
   const ensembleMethod = request.params.ensemble_method ?? 'none';
 
   const payload: Record<string, unknown> = {
     job_name: `model_train_t${request.target.horizonDays}_${dayjs().format('YYYYMMDDHHmmss')}`,
     display_name: request.displayName,
     model_type: modelType,
+    feature_mode: request.featureMode,
     train_start: trainStart,
     train_end: trainEnd,
     valid_start: validStart,

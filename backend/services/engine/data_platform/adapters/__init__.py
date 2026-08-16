@@ -4,7 +4,7 @@
     from backend.services.engine.data_platform.adapters import register_all
     register_all()
 
-A 股唯一数据源为 quantdb_local（本地 parquet）。
+A 股主数据源为 quantdb_local（本地 parquet），StockDB 仅作可配置 fallback。
 akshare / efinance / yahoo_finance / simonlin_global 仅服务 HK/US 市场。
 """
 
@@ -27,8 +27,9 @@ def _collect() -> None:
     out: list[tuple[str, Callable[[], bool]]] = []
 
     for mod_name in (
-        # A 股唯一数据源：QuantDB 本地 parquet
+        # A 股主源和本地 HTTP fallback
         "backend.services.engine.data_platform.adapters.quantdb_local_adapter",
+        "backend.services.engine.data_platform.adapters.stockdb_adapter",
         # HK/US 市场数据源
         "backend.services.engine.data_platform.adapters.yahoo_finance_adapter",
         "backend.services.engine.data_platform.adapters.simonlin_global_adapter",

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-QuantMind 云端训练脚本 (CVM 容器内运行)
-=========================================
+QuantMind 训练脚本（Docker 容器或本机 Conda 进程运行）
 参数传递方式：YAML 配置文件（固化在镜像中，参数通过挂载的 config.yaml 传入）
 
 用法：
@@ -34,7 +33,10 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import requests
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None
 import yaml
 
 logging.basicConfig(
@@ -43,6 +45,13 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("quantmind.train")
+WORKSPACE = Path(os.getenv("TRAINING_WORKSPACE_DIR", "/workspace"))
+_INFERENCE_TEMPLATE = Path("/app/backend/services/engine/inference/templates/inference_parquet.py")
+if not _INFERENCE_TEMPLATE.is_file():
+    _INFERENCE_TEMPLATE = (
+        Path(__file__).resolve().parents[2]
+        / "backend/services/engine/inference/templates/inference_parquet.py"
+    )
 
 
 # ── 硬件环境检测 ──────────────────────────────────────────────────────────────
@@ -1462,10 +1471,7 @@ _QLIB_TS_MODEL_MAP: dict[str, tuple[str, str]] = {
 _QLIB_FLAT_MODEL_MAP: dict[str, tuple[str, str]] = {
     "tabnet":      ("qlib.contrib.model.pytorch_tabnet",         "TabnetModel"),
 }
-_QLIB_MODEL_MAP = {**_QLIB_TS_MODEL_MAP, **_QLIB_FLAT_MODEL_MAP}
-
-
-class _TSLazyDataset(torch.utils.data.Dataset):
+class _TSLazyDataset(torch.utils.data.Dataset if torch is not None else object):
     """Lazy TS dataset: 按需生成滚动窗口，避免一次性加载全部窗口到内存。
 
     存储原始数据 (per-instrument contiguous arrays)，__getitem__ 时动态切片。
@@ -2315,7 +2321,7 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
         model = _train_linear(cfg, features, X_train, y_train, X_val, y_val)
     elif model_type == "nativetft":
         dl_params = model_cfg.get("dl_params", {})
-        output_dir = Path("/workspace")
+        output_dir = WORKSPACE
         model, train_m, val_m, dl_metadata = _train_nativetft(
             model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
         )
@@ -2360,7 +2366,7 @@ def train_model(df: pd.DataFrame, features: list[str], cfg: dict, hardware: dict
         )
     elif model_type in _DL_MODEL_TYPES:
         dl_params = model_cfg.get("dl_params", {})
-        output_dir = Path("/workspace")
+        output_dir = WORKSPACE
         model, train_m, val_m, dl_metadata = _train_dl(
             model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
         )
@@ -2586,7 +2592,7 @@ def _train_single_model(
     elif model_type == "linear":
         model = _train_linear(cfg, features, X_train, y_train, X_val, y_val)
     elif model_type == "nativetft":
-        output_dir = Path("/workspace")
+        output_dir = WORKSPACE
         dl_params = model_cfg.get("dl_params", {})
         model, train_m, val_m, dl_metadata = _train_nativetft(
             model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
@@ -2618,7 +2624,7 @@ def _train_single_model(
             "elapsed": elapsed,
         }
     elif model_type in _DL_MODEL_TYPES:
-        output_dir = Path("/workspace")
+        output_dir = WORKSPACE
         dl_params = model_cfg.get("dl_params", {})
         model, train_m, val_m, dl_metadata = _train_dl(
             model_type, train_df, val_df, features, dl_params, output_dir, hardware=hardware
@@ -2984,13 +2990,13 @@ def train_stacking(
         **{f"oof_{mt}": oof_preds[mt] for mt in model_types},
         "label": train_df[label_col],
     })
-    oof_path = Path("/workspace/oof_predictions.parquet")
+    oof_path = WORKSPACE / "oof_predictions.parquet"
     oof_df.to_parquet(oof_path, engine="pyarrow", compression="zstd", index=False)
     logger.info("OOF predictions saved to %s", oof_path)
 
     # 保存元学习器
     import pickle
-    meta_model_path = Path("/workspace/meta_model.pkl")
+    meta_model_path = WORKSPACE / "meta_model.pkl"
     with open(meta_model_path, "wb") as f:
         pickle.dump({
             "model": meta_model,
@@ -3049,6 +3055,102 @@ def train_stacking(
     }
 
 
+
+def _run_qlib_alpha158_training(cfg: dict[str, Any], hardware: dict[str, Any]) -> dict[str, Any]:
+    """Train native Qlib Alpha158 without touching the snapshot-Parquet workflow."""
+    try:
+        import qlib
+        from qlib.contrib.data.handler import Alpha158
+        from qlib.contrib.model.gbdt import LGBModel
+        from qlib.data.dataset import DatasetH
+        from qlib.data.dataset.handler import DataHandlerLP
+    except ImportError as exc:
+        raise RuntimeError("Qlib Alpha158 dependencies are unavailable in the training image") from exc
+
+    data_cfg, model_cfg = cfg.get("data") or {}, cfg.get("model") or {}
+    label_cfg, split_cfg = cfg.get("label") or {}, cfg.get("split") or {}
+    provider_uri = str(data_cfg.get("qlib_provider_uri") or os.getenv("QLIB_PROVIDER_URI") or "").strip()
+    if not provider_uri or not Path(provider_uri).is_dir():
+        raise RuntimeError(f"Qlib provider data is unavailable: {provider_uri or '<empty>'}")
+    split_names = ("train", "valid", "test")
+    if not all(split_cfg.get(name) and len(split_cfg[name]) == 2 for name in split_names):
+        raise RuntimeError("Qlib Alpha158 mode requires explicit train, valid and test date ranges")
+
+    horizon = int(label_cfg.get("target_horizon_days") or 1)
+    label_expression = f"Ref($close, -{horizon + 1})/Ref($close, -1) - 1"
+    segments = {name: tuple(split_cfg[name]) for name in split_names}
+    qlib.init(provider_uri=provider_uri)
+    handler = Alpha158(
+        instruments=str(data_cfg.get("qlib_universe") or "all"),
+        start_time=segments["train"][0], end_time=segments["test"][1],
+        fit_start_time=segments["train"][0], fit_end_time=segments["train"][1],
+        label=([label_expression], ["LABEL0"]),
+    )
+    dataset = DatasetH(handler=handler, segments=segments)
+    params = {**DEFAULT_LGB_PARAMS, **(model_cfg.get("params") or {})}
+    params.update({"num_boost_round": int(model_cfg.get("num_boost_round") or 1000), "early_stopping_rounds": int(model_cfg.get("early_stopping_rounds") or 100)})
+    model = LGBModel(**{key: value for key, value in params.items() if value is not None})
+    started_at = time.time()
+    model.fit(dataset)
+
+    def as_series(value: Any, name: str) -> pd.Series:
+        if isinstance(value, pd.DataFrame):
+            return value.iloc[:, 0].rename(name)
+        if isinstance(value, pd.Series):
+            return value.rename(name)
+        return pd.Series(value, name=name)
+
+    metrics: dict[str, dict[str, Any]] = {}
+    frames: list[pd.DataFrame] = []
+    for segment in split_names:
+        labels = as_series(dataset.prepare(segment, col_set="label", data_key=DataHandlerLP.DK_L), "label")
+        scores = as_series(model.predict(dataset, segment=segment), "score")
+        frame = pd.concat([labels, scores], axis=1).dropna().reset_index()
+        if frame.empty:
+            raise RuntimeError(f"Qlib Alpha158 produced no usable {segment} predictions")
+        if "datetime" not in frame.columns:
+            frame = frame.rename(columns={frame.columns[0]: "datetime"})
+        if "instrument" not in frame.columns:
+            frame = frame.rename(columns={frame.columns[1]: "instrument"})
+        metric_frame = frame.rename(columns={"datetime": "trade_date"})
+        metrics[segment] = _compute_metrics(metric_frame, metric_frame["label"].to_numpy(dtype="float64"), metric_frame["score"].to_numpy(dtype="float64"))
+        frames.append(frame.assign(split=segment))
+
+    pred_frame = pd.concat(frames, ignore_index=True).sort_values(["datetime", "instrument"])
+    workspace = WORKSPACE
+    booster = getattr(model, "model", None)
+    if booster is None or not hasattr(booster, "save_model"):
+        raise RuntimeError("Native Qlib LightGBM model did not expose a saveable booster")
+    booster.save_model(str(workspace / "model.lgb"))
+    pred_frame.rename(columns={"instrument": "symbol", "score": "pred"}).to_parquet(workspace / "pred.parquet", engine="pyarrow", compression="zstd", index=False)
+    pred_frame[["datetime", "instrument", "score"]].set_index(["datetime", "instrument"]).to_pickle(workspace / "pred.pkl")
+
+    metadata = {
+        "run_id": cfg.get("run_id", "unknown"), "job_name": cfg.get("job_name", "unnamed"),
+        "framework": "qlib", "model_type": "lightgbm", "model_file": "model.lgb",
+        "data_source": "qlib", "feature_mode": "qlib_alpha158", "feature_count": 158,
+        "requested_feature_count": 0, "requested_features": [], "features": ["Alpha158"],
+        "feature_columns": ["Alpha158"], "qlib_provider_uri": provider_uri,
+        "qlib_universe": str(data_cfg.get("qlib_universe") or "all"), "label_expression": label_expression,
+        "target_horizon_days": horizon, "target_mode": str(label_cfg.get("target_mode") or "return"),
+        "label_formula": str(label_cfg.get("label_formula") or label_expression),
+        "training_window": str(label_cfg.get("training_window") or ""),
+        "train_start": segments["train"][0], "train_end": segments["train"][1],
+        "val_start": segments["valid"][0], "val_end": segments["valid"][1],
+        "test_start": segments["test"][0], "test_end": segments["test"][1],
+        "context": cfg.get("context") or {}, "hardware": hardware,
+        "metrics": {"train_ic": metrics["train"]["ic"], "train_rank_ic": metrics["train"]["rank_ic"], "train_rank_icir": metrics["train"]["rank_icir"], "val_ic": metrics["valid"]["ic"], "val_rank_ic": metrics["valid"]["rank_ic"], "val_rank_icir": metrics["valid"]["rank_icir"], "test_ic": metrics["test"]["ic"], "test_rank_ic": metrics["test"]["rank_ic"], "test_rank_icir": metrics["test"]["rank_icir"], "score_direction": metrics["valid"].get("score_direction", "normal")},
+        "pred_coverage_start": str(pd.to_datetime(pred_frame["datetime"].min()).date()), "pred_coverage_end": str(pd.to_datetime(pred_frame["datetime"].max()).date()), "pred_rows": int(len(pred_frame)), "generated_at": datetime.utcnow().isoformat(), "elapsed_seconds": float(time.time() - started_at),
+    }
+    (workspace / "metadata.json").write_text(json.dumps(_sanitize_nan_inf(metadata), ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "status": "completed", "run_id": metadata["run_id"], "job_name": metadata["job_name"],
+        "metrics": {"train": {"rmse": metrics["train"]["rmse"], "auc": metrics["train"]["auc"]}, "val": {"rmse": metrics["valid"]["rmse"], "auc": metrics["valid"]["auc"]}, "test": {"rmse": metrics["test"]["rmse"], "auc": metrics["test"]["auc"]}},
+        "artifacts": [{"name": name, "local": f"/workspace/{name}"} for name in ("model.lgb", "pred.parquet", "pred.pkl", "metadata.json", "config.yaml", "result.json")],
+        "summary": {"status": "训练完成", "message": f"Qlib 原生 Alpha158 训练完成，val_icir={metrics['valid']['rank_icir']:.4f}"},
+        "metadata": metadata, "error": "", "logs": f"Qlib Alpha158 complete; val_icir={metrics['valid']['rank_icir']:.6f}",
+    }
+
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 def main() -> int:
     # 最早期诊断日志：在任何处理之前打印，确保 Batch 环境中一定能看到
@@ -3077,7 +3179,7 @@ def main() -> int:
     result: dict = {}
     callback_url    = ""
     callback_secret = ""
-    result_path = Path("/workspace/result.json")
+    result_path = WORKSPACE / "result.json"
 
     try:
         if not cfg_path.exists():
@@ -3105,6 +3207,11 @@ def main() -> int:
 
         # 硬件环境检测
         hardware = detect_hardware()
+
+        # 原生 Qlib 因子模式与快照 Parquet 模式严格分支，默认保持旧链路。
+        if str((cfg.get("data") or {}).get("feature_mode") or "snapshot").lower() == "qlib_alpha158":
+            result = _run_qlib_alpha158_training(cfg, hardware)
+            return 0
 
         # 数据加载（特征列自动补齐基础6列）
         submitted_features = list(dict.fromkeys([str(item).strip() for item in (cfg["data"].get("features", []) or []) if str(item).strip()]))
@@ -3191,7 +3298,7 @@ def main() -> int:
             is_stacking = multi_result.get("ensemble_method") == "stacking"
 
             # 保存各基模型
-            workspace = Path("/workspace")
+            workspace = WORKSPACE
             saved_models: dict[str, str] = {}
             for mt, res in multi_result["models"].items():
                 suffix_map = {"lightgbm": "_lgb", "xgboost": "_xgb", "catboost": "_cbm", "linear": "_lin"}
@@ -3235,7 +3342,7 @@ def main() -> int:
                     best_iteration = None
 
             # 保存预测
-            pred_path = Path("/workspace/pred.parquet")
+            pred_path = WORKSPACE / "pred.parquet"
             pred_df.to_parquet(pred_path, engine="pyarrow", compression="zstd", index=False)
             logger.info(f"Predictions saved to {pred_path}")
 
@@ -3246,7 +3353,7 @@ def main() -> int:
                 .set_index(["datetime", "instrument"])
                 .sort_index()
             )
-            pred_pkl_path = Path("/workspace/pred.pkl")
+            pred_pkl_path = WORKSPACE / "pred.pkl"
             pred_qlib.to_pickle(pred_pkl_path)
             logger.info(f"Backtest-compatible pred.pkl saved ({len(pred_qlib):,} rows)")
 
@@ -3258,7 +3365,7 @@ def main() -> int:
             shap_info: dict[str, Any] = {"enabled": False, "status": "disabled"}
             if "lightgbm" in multi_result["models"]:
                 lgb_res = multi_result["models"]["lightgbm"]
-                shap_summary_path = Path("/workspace/shap_summary.csv")
+                shap_summary_path = WORKSPACE / "shap_summary.csv"
                 shap_info = _compute_shap_summary(
                     model=lgb_res["model"],
                     split_frames=lgb_res["split_frames"],
@@ -3340,12 +3447,12 @@ def main() -> int:
                 metadata.update(dl_metadata)
 
             metadata_bytes = json.dumps(_sanitize_nan_inf(metadata), ensure_ascii=False, indent=2).encode()
-            Path("/workspace/metadata.json").write_bytes(metadata_bytes)
+            (WORKSPACE / "metadata.json").write_bytes(metadata_bytes)
             logger.info("metadata.json saved locally")
 
             # 复制推理脚本模板
-            template_path = Path("/app/backend/services/engine/inference/templates/inference_parquet.py")
-            inference_dest = Path("/workspace/inference.py")
+            template_path = _INFERENCE_TEMPLATE
+            inference_dest = WORKSPACE / "inference.py"
             if template_path.is_file():
                 inference_dest.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
                 logger.info("inference.py copied from unified template: %s", template_path)
@@ -3387,7 +3494,7 @@ def main() -> int:
                     {"name": "meta_model.pkl", "local": "/workspace/meta_model.pkl"},
                     {"name": "oof_predictions.parquet", "local": "/workspace/oof_predictions.parquet"},
                 ])
-            if shap_info.get("status") == "completed" and Path("/workspace/shap_summary.csv").exists():
+            if shap_info.get("status") == "completed" and (WORKSPACE / "shap_summary.csv").exists():
                 result["artifacts"].append({"name": "shap_summary.csv", "local": "/workspace/shap_summary.csv"})
 
         else:
@@ -3411,12 +3518,12 @@ def main() -> int:
             logger.info("Training finished in %.2fs, best_iteration=%s, model_type=%s", elapsed, best_iteration, actual_model_type)
 
             # 保存模型（多框架）
-            workspace = Path("/workspace")
+            workspace = WORKSPACE
             model_filename = _save_model(model, actual_model_type, workspace)
             logger.info(f"Model saved to {workspace / model_filename}")
 
             # 保存预测结果（parquet 压缩用于存档，比 pickle 小 ~10x）
-            pred_path = Path("/workspace/pred.parquet")
+            pred_path = WORKSPACE / "pred.parquet"
             pred_df.to_parquet(pred_path, engine="pyarrow", compression="zstd", index=False)
             logger.info(f"Predictions saved to {pred_path} ({pred_path.stat().st_size/1024/1024:.1f} MB)")
 
@@ -3429,11 +3536,11 @@ def main() -> int:
                 .set_index(["datetime", "instrument"])
                 .sort_index()
             )
-            pred_pkl_path = Path("/workspace/pred.pkl")
+            pred_pkl_path = WORKSPACE / "pred.pkl"
             pred_qlib.to_pickle(pred_pkl_path)
             logger.info(f"Backtest-compatible pred.pkl saved ({pred_pkl_path.stat().st_size/1024/1024:.1f} MB, {len(pred_qlib):,} rows)")
 
-            shap_summary_path = Path("/workspace/shap_summary.csv")
+            shap_summary_path = WORKSPACE / "shap_summary.csv"
             # SHAP: pred_contrib 仅支持 LightGBM；其他框架暂跳过
             if actual_model_type != "lightgbm":
                 explain_cfg_shap = {**explain_cfg, "enable_shap": False}
@@ -3510,12 +3617,12 @@ def main() -> int:
                 metadata.update(dl_metadata)
 
             metadata_bytes = json.dumps(_sanitize_nan_inf(metadata), ensure_ascii=False, indent=2).encode()
-            Path("/workspace/metadata.json").write_bytes(metadata_bytes)
+            (WORKSPACE / "metadata.json").write_bytes(metadata_bytes)
             logger.info("metadata.json saved locally")
 
             # 复制统一推理脚本模板（而非内联生成旧版脚本）
-            template_path = Path("/app/backend/services/engine/inference/templates/inference_parquet.py")
-            inference_dest = Path("/workspace/inference.py")
+            template_path = _INFERENCE_TEMPLATE
+            inference_dest = WORKSPACE / "inference.py"
             if template_path.is_file():
                 inference_dest.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
                 logger.info("inference.py copied from unified template: %s", template_path)

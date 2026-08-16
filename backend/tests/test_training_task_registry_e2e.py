@@ -125,11 +125,11 @@ def test_orphan_container_cleanup_in_launch_path():
     content = fp.read_text(encoding="utf-8")
     # 找 launch_training_job 函数体
     m = re.search(
-        r"async def launch_training_job.*?(?=\n    async def |\nclass |\Z)",
+        r"async def _launch_training_job.*?(?=\n    async def |\nclass |\Z)",
         content,
         re.DOTALL,
     )
-    assert m, "launch_training_job not found"
+    assert m, "_launch_training_job not found"
     fn_body = m.group(0)
     # 必须含 containers.get + stop + remove
     assert "containers.get" in fn_body, "missing containers.get in launch_training_job"

@@ -414,18 +414,18 @@ def test_orphan_container_cleanup_in_launch():
     # 简化检查：launch 函数内必须出现 containers.get 或类似清理代码
     # 找到 "async def launch_training_job" 起点到下一个 "async def" 之前
     m = re.search(
-        r"async def launch_training_job.*?(?=\n    async def |\nclass |\Z)",
+        r"async def _launch_training_job.*?(?=\n    async def |\nclass |\Z)",
         content,
         re.DOTALL,
     )
     if not m:
-        pytest.skip("launch_training_job not found in local_docker_orchestrator.py")
+        pytest.skip("_launch_training_job not found in local_docker_orchestrator.py")
     fn_body = m.group(0)
     # 函数体里必须出现 containers.get 或 NotFound 处理
     has_cleanup = "containers.get" in fn_body and "NotFound" in fn_body
     if not has_cleanup:
         pytest.fail(
-            "launch_training_job must check for existing container "
+            "_launch_training_job must check for existing container "
             "(containers.get + NotFound handling) before docker run"
         )
 

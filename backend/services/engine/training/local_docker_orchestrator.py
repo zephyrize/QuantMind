@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,6 +50,20 @@ _DOCKER_NETWORK = os.getenv("TRAINING_DOCKER_NETWORK", "quantmind-network")
 
 _LOCAL_DATA_MOUNT_DIR = "/tmp/feature_snapshots"
 _QUANTDB_DATA_MOUNT_DIR = "/tmp/quantdb_data"
+_QLIB_DATA_MOUNT_DIR = "/tmp/qlib_data"
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _resolve_execution_mode() -> str:
+    """Use a direct Conda process on the host and Docker only in containers."""
+    configured = os.getenv("TRAINING_LOCAL_EXECUTION_MODE", "auto").strip().lower()
+    if configured in {"process", "docker"}:
+        return configured
+    if configured not in {"", "auto"}:
+        raise RuntimeError(
+            "TRAINING_LOCAL_EXECUTION_MODE must be auto, process, or docker"
+        )
+    return "docker" if Path("/.dockerenv").exists() else "process"
 
 # ── 训练资源保护：训练期间临时停止其它容器，把内存腾给训练任务 ───────────────────
 # 通过 TRAINING_PAUSE_OTHERS=false 可关闭该行为
@@ -107,11 +122,22 @@ def _resolve_bind_mount_source(
 
 class LocalDockerOrchestrator(TrainingOrchestrator):
     def __init__(self):
-        self.docker = DockerClient.from_env()
+        self.execution_mode = _resolve_execution_mode()
+        self.docker = (
+            DockerClient.from_env() if self.execution_mode == "docker" else None
+        )
         self._self_mounts: list[dict[str, Any]] | None = None
-        self.api_base = (
-            os.getenv("QUANTMIND_API_BASE_URL") or "http://quantmind-api:8000"
-        ).strip()
+        default_api_base = (
+            "http://quantmind-api:8000"
+            if self.execution_mode == "docker"
+            else "http://127.0.0.1:8000"
+        )
+        configured_api_base = (
+            os.getenv("TRAINING_LOCAL_API_BASE_URL")
+            if self.execution_mode == "process"
+            else os.getenv("QUANTMIND_API_BASE_URL")
+        )
+        self.api_base = (configured_api_base or default_api_base).strip()
         self.internal_secret = (os.getenv("INTERNAL_CALL_SECRET") or "").strip()
         # P0-3: 强制 fail-closed。secret 缺失直接抛错，不再用空 secret 走 fail-open。
         if not self.internal_secret:
@@ -130,6 +156,8 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         if not container_id:
             raise RuntimeError("Cannot determine current container ID for volume mapping")
         try:
+            if self.docker is None:
+                raise RuntimeError("Docker client is unavailable in process mode")
             container = self.docker.containers.get(container_id)
             self._self_mounts = list(container.attrs.get("Mounts") or [])
         except Exception as exc:
@@ -352,14 +380,23 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
             payload.get("context") if isinstance(payload.get("context"), dict) else {}
         )
 
-        # 强制使用本地数据，不回落到 COS 下载
-        data_source_mode = payload.get("data_source_mode", "LOCAL")
+        # 默认保持快照 Parquet 训练链路。Qlib 原生模式是显式 opt-in，
+        # 不参与快照字段过滤，避免影响既有训练任务。
+        feature_mode = str(payload.get("feature_mode") or "snapshot").strip().lower()
+        if feature_mode not in {"snapshot", "qlib_alpha158"}:
+            raise ValueError(f"Unsupported feature_mode: {feature_mode}")
+        data_source_mode = "QLIB" if feature_mode == "qlib_alpha158" else payload.get(
+            "data_source_mode", "LOCAL"
+        )
 
         # 过滤掉 parquet 中不存在的特征，避免无效内存分配
         requested_features = payload.get("features", [])
-        valid_features, missing_features = self._filter_features_by_parquet(
-            run_id, requested_features
-        )
+        if feature_mode == "qlib_alpha158":
+            valid_features, missing_features = [], []
+        else:
+            valid_features, missing_features = self._filter_features_by_parquet(
+                run_id, requested_features
+            )
         if missing_features:
             logger.warning(
                 "[%s] %d/%d requested features not in parquet, filtered out: %s...",
@@ -379,10 +416,15 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                 "train_start": payload.get("train_start", "2022-01-01"),
                 "train_end": payload.get("train_end", "2024-12-31"),
                 "features": valid_features,
+                "feature_mode": feature_mode,
                 "source_mode": data_source_mode,
                 "local_dir": _LOCAL_DATA_MOUNT_DIR
                 if data_source_mode == "LOCAL"
                 else None,
+                "qlib_provider_uri": _QLIB_DATA_MOUNT_DIR
+                if feature_mode == "qlib_alpha158"
+                else None,
+                "qlib_universe": str(payload.get("qlib_universe") or "all"),
             },
             "model": {
                 "type": payload.get("model_type", "lightgbm"),
@@ -426,8 +468,11 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                 ),
             },
             "callback": {
-                "url": f"{self.api_base}/api/v1/models/training-runs/{run_id}/complete",
-                "secret": self.internal_secret,
+                "url": (
+                    f"{getattr(self, 'api_base', 'http://quantmind-api:8000')}"
+                    f"/api/v1/models/training-runs/{run_id}/complete"
+                ),
+                "secret": getattr(self, 'internal_secret', ''),
             },
             "cache": {"dir": "/tmp" if data_source_mode == "LOCAL" else None},
         }
@@ -468,6 +513,176 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
 
     # ── 启动训练任务 ─────────────────────────────────────────────────────────────
     async def launch_training_job(self, run_id: str, payload: dict = None) -> None:
+        """Launch one job and persist every pre-start failure."""
+        try:
+            await self._launch_training_job(run_id, payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("[%s] training startup failed", run_id)
+            await self._mark_startup_failed(run_id, exc)
+
+    async def _mark_startup_failed(self, run_id: str, exc: Exception) -> None:
+        """Do not leave a submitted job in provisioning after an early error."""
+        from backend.services.api.routers.admin.db import TrainingJobRecord
+        from backend.shared.database_manager_v2 import get_session
+
+        message = f"[ERROR] Training startup failed: {exc}"
+        tenant_id, user_id = "default", "unknown"
+        try:
+            async with get_session() as db:
+                record = await db.get(TrainingJobRecord, run_id)
+                if record:
+                    tenant_id = str(record.tenant_id or tenant_id)
+                    user_id = str(record.user_id or user_id)
+                    if record.status not in {"completed", "failed"}:
+                        record.status = "failed"
+                        record.progress = 100
+                        record.logs = (record.logs or "") + message + "\n"
+                        await db.commit()
+        finally:
+            self.log_stream.append_log(
+                run_id=run_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                line=message,
+                status="failed",
+                progress=100,
+            )
+
+    async def _launch_local_process(
+        self,
+        run_id: str,
+        payload: dict[str, Any],
+        config: dict[str, Any],
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        """Run the existing training script with this backend's Conda Python."""
+        from backend.services.api.routers.admin.db import TrainingJobRecord
+        from backend.shared.database_manager_v2 import get_session
+        from backend.shared.model_registry import model_registry_service
+
+        model_id = model_registry_service.build_model_id_from_run(run_id)
+        workspace = model_registry_service.user_models_root / tenant_id / user_id / model_id
+        workspace.mkdir(parents=True, exist_ok=True)
+        data_cfg = config.setdefault("data", {})
+        data_cfg["local_dir"] = str(_PROJECT_ROOT / "db" / "feature_snapshots")
+        if data_cfg.get("feature_mode") == "qlib_alpha158":
+            data_cfg["qlib_provider_uri"] = str(_PROJECT_ROOT / "db" / "qlib_data")
+        config["output"]["result_path"] = str(workspace / "result.json")
+        config_path = workspace / "config.yaml"
+        config_path.write_text(
+            yaml.dump(config, allow_unicode=True, default_flow_style=False),
+            encoding="utf-8",
+        )
+
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "TRAINING_WORKSPACE_DIR": str(workspace),
+                "QLIB_PROVIDER_URI": str(data_cfg.get("qlib_provider_uri") or ""),
+                "PYTHONPATH": os.pathsep.join(
+                    [str(_PROJECT_ROOT), environment.get("PYTHONPATH", "")]
+                ).rstrip(os.pathsep),
+            }
+        )
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(_PROJECT_ROOT / "docker" / "training" / "train.py"),
+            "--config",
+            str(config_path),
+            cwd=str(_PROJECT_ROOT),
+            env=environment,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        process_id = f"local:{process.pid}"
+        async with get_session() as db:
+            record = await db.get(TrainingJobRecord, run_id)
+            if record:
+                record.status = "running"
+                record.progress = max(int(record.progress or 0), 12)
+                record.instance_id = process_id
+                record.logs = (record.logs or "") + f"Local Conda PID: {process.pid}\n"
+                await db.commit()
+        self.log_stream.append_log(
+            run_id=run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            line=f"[SYSTEM] Local Conda process started: pid={process.pid}",
+            status="running",
+            progress=12,
+            container_id=process_id,
+        )
+        REGISTRY.register(
+            self._poll_local_process(
+                run_id, process, tenant_id=tenant_id, user_id=user_id, payload=payload
+            )
+        )
+
+    async def _poll_local_process(
+        self,
+        run_id: str,
+        process: asyncio.subprocess.Process,
+        *,
+        tenant_id: str,
+        user_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Forward local stdout and fail closed when a callback is missing."""
+        max_minutes = max(10, int(payload.get("max_time_minutes") or 120))
+        deadline = time.time() + max_minutes * 60
+        progress, tail_logs = 12, []
+        stream = process.stdout
+        while process.returncode is None:
+            if time.time() >= deadline:
+                process.terminate()
+                await process.wait()
+                await self._mark_startup_failed(
+                    run_id, RuntimeError(f"Local process exceeded {max_minutes}min limit")
+                )
+                return
+            try:
+                raw_line = await asyncio.wait_for(stream.readline(), timeout=1)
+            except asyncio.TimeoutError:
+                continue
+            if not raw_line:
+                await process.wait()
+                continue
+            line = raw_line.decode("utf-8", errors="replace").rstrip()
+            if not line:
+                continue
+            tail_logs.append(line)
+            tail_logs = tail_logs[-100:]
+            progress = self._infer_progress_from_log_line(line, progress)
+            self.log_stream.append_log(
+                run_id=run_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                line=line,
+                status="running",
+                progress=progress,
+                container_id=f"local:{process.pid}",
+            )
+
+        from backend.services.api.routers.admin.db import TrainingJobRecord
+        from backend.shared.database_manager_v2 import get_session
+
+        async with get_session(read_only=True) as db:
+            record = await db.get(TrainingJobRecord, run_id)
+            if record and record.status in {"completed", "failed"}:
+                return
+        detail = "\n".join(tail_logs[-30:])
+        if process.returncode == 0:
+            error = RuntimeError("Local process exited without training callback")
+        else:
+            error = RuntimeError(
+                f"Local process exited with code {process.returncode}: {detail}"
+            )
+        await self._mark_startup_failed(run_id, error)
+
+    async def _launch_training_job(self, run_id: str, payload: dict = None) -> None:
         from backend.shared.database_manager_v2 import get_session
         from backend.services.api.routers.admin.db import TrainingJobRecord
 
@@ -476,6 +691,10 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
             payload = {}
 
         config = self._build_config_yaml(run_id, payload)
+        launch_label = (
+            "local Conda process" if self.execution_mode == "process" else "container image"
+        )
+        launch_target = sys.executable if self.execution_mode == "process" else _TRAINING_IMAGE
         async with get_session() as db:
             record = await db.get(TrainingJobRecord, run_id)
             if record:
@@ -484,7 +703,7 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                 # 增量记录日志，防止覆盖 [SYSTEM] 训练任务已创建
                 record.logs = (
                     record.logs or ""
-                ) + f"Starting container: {_TRAINING_IMAGE}\n"
+                ) + f"Starting {launch_label}: {launch_target}\n"
                 user_id = str(record.user_id or "unknown")
                 tenant_id = str(record.tenant_id or "default")
 
@@ -498,7 +717,7 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                     run_id=run_id,
                     tenant_id=tenant_id,
                     user_id=user_id,
-                    line=f"[SYSTEM] Starting container image: {_TRAINING_IMAGE}",
+                    line=f"[SYSTEM] Starting {launch_label}: {launch_target}",
                     status="provisioning",
                     progress=5,
                 )
@@ -518,6 +737,12 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                 )
                 user_id = "unknown"
                 tenant_id = "default"
+
+        if self.execution_mode == "process":
+            await self._launch_local_process(
+                run_id, payload, config, tenant_id, user_id
+            )
+            return
 
         # ── 准备训练工作目录 ────────────────────────────────────────────────────
         # 使用 /data/training_jobs/{run_id} 作为训练容器的工作目录。
@@ -551,6 +776,7 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         training_script_host_path = self._daemon_host_path(
             Path("/app/docker/training/train.py")
         )
+        feature_mode = str((config.get("data") or {}).get("feature_mode") or "snapshot")
 
         # 强制创建目录（使用容器内路径，确保 API 容器可写入）
         os.makedirs(internal_output_dir, exist_ok=True)
@@ -590,6 +816,33 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
             str(host_output_dir): {"bind": "/workspace", "mode": "rw"},
             str(local_data_host_path): {"bind": _LOCAL_DATA_MOUNT_DIR, "mode": "ro"},
         }
+        if feature_mode == "qlib_alpha158":
+            configured_qlib_uri = os.getenv("QLIB_PROVIDER_URI", "").strip()
+            qlib_candidates = [
+                Path(configured_qlib_uri) if configured_qlib_uri else None,
+                Path("/app/db/qlib_data"),
+                Path("/data/quantdb/.qlib_cache/cn_data"),
+            ]
+            qlib_source = next(
+                (candidate for candidate in qlib_candidates if candidate and candidate.exists()),
+                None,
+            )
+            if qlib_source is None:
+                raise RuntimeError(
+                    "Qlib Alpha158 mode requires local Qlib binary data. "
+                    "Set QLIB_PROVIDER_URI or provide db/qlib_data."
+                )
+            qlib_data_host_path = self._daemon_host_path(qlib_source)
+            volumes[str(qlib_data_host_path)] = {
+                "bind": _QLIB_DATA_MOUNT_DIR,
+                "mode": "ro",
+            }
+            logger.info(
+                "[%s] Qlib binary data mounted: %s -> %s",
+                run_id,
+                qlib_data_host_path,
+                _QLIB_DATA_MOUNT_DIR,
+            )
         # 挂载 QuantDB 全量数据（6大类：kline/base_sector/financial/bond_etf/technical_derived/ml_datasets）
         # 存在性检查必须针对【容器内】可见的 _qdb_dir，而非宿主机路径
         # （API 容器内 os.path.exists 无法感知宿主机路径，与 _LOCAL_DATA_PATH 同理）

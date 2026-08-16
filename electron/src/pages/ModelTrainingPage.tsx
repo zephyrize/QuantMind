@@ -15,7 +15,7 @@ import { modelTrainingService } from '../services/modelTrainingService';
 import { useAppSelector } from '../store';
 import { selectCurrentMarket, AppMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
-import { TrainingTarget, TrainingParams, TrainingContext, TrainingStatus, TrainingDraft, SplitKey, TimePeriodMap, FeatureCategory, STORAGE_KEY, DEFAULT_FEATURE_CATEGORIES, PRESET_DEFAULT_FEATURES, MARKET_DEFAULT_FEATURES, getDefaultFeaturesForMarket, resolveDefaultSelectedFeatures, DEFAULT_TIME_PERIODS, DEFAULT_TARGET, DEFAULT_PARAMS, DEFAULT_CONTEXT, buildAutoDisplayName, buildLabelFormula, buildEffectiveTradeDate, daysBetween, toISOStringRange, restoreRange, shouldMigrateLegacyDraftPeriods, buildTrainingRequest, formatRange, toDynamicCategories, TrainingResult, buildBackendTrainingPayload, parseTrainingResult, parseSuggestedTimePeriods, MODEL_DL_DEFAULTS, WfaConfig } from './training/trainingUtils';
+import { TrainingTarget, TrainingParams, TrainingContext, TrainingStatus, TrainingDraft, SplitKey, TimePeriodMap, FeatureCategory, STORAGE_KEY, DEFAULT_FEATURE_CATEGORIES, PRESET_DEFAULT_FEATURES, MARKET_DEFAULT_FEATURES, getDefaultFeaturesForMarket, resolveDefaultSelectedFeatures, DEFAULT_TIME_PERIODS, DEFAULT_TARGET, DEFAULT_PARAMS, DEFAULT_CONTEXT, buildAutoDisplayName, buildLabelFormula, buildEffectiveTradeDate, daysBetween, toISOStringRange, restoreRange, shouldMigrateLegacyDraftPeriods, buildTrainingRequest, formatRange, toDynamicCategories, TrainingResult, buildBackendTrainingPayload, parseTrainingResult, parseSuggestedTimePeriods, MODEL_DL_DEFAULTS, WfaConfig, FeatureMode } from './training/trainingUtils';
 import { AdminModelFeatureDataCoverage } from '../features/admin/types';
 import { adminService } from '../features/admin/services/adminService';
 import { FeatureSelector } from './training/FeatureSelector';
@@ -56,6 +56,7 @@ const MetricCard: React.FC<{
 
 interface FormState {
   selectedFeatures: string[];
+  featureMode: FeatureMode;
   timePeriods: TimePeriodMap;
   wfaConfig: WfaConfig;
   target: TrainingTarget;
@@ -69,6 +70,7 @@ interface FormState {
 type FormAction =
   | { type: 'HYDRATE'; payload: TrainingDraft | null }
   | { type: 'SET_FEATURES'; payload: string[] }
+  | { type: 'SET_FEATURE_MODE'; payload: FeatureMode }
   | { type: 'SET_TIME'; key: SplitKey; value: [Dayjs, Dayjs] }
   | { type: 'SET_TARGET'; payload: TrainingTarget }
   | { type: 'SET_PARAMS'; payload: TrainingParams }
@@ -94,6 +96,7 @@ function formReducer(state: FormState, action: FormAction): FormState {
       const restoredWfa = p.wfa ?? { enabled: false, strategy: 'rolling', nWindows: 4, trainYears: 3, valMonths: 12, stepMonths: 12 };
       return {
         ...state,
+        featureMode: p.featureMode || "snapshot",
         selectedFeatures: p.selectedFeatures && p.selectedFeatures.length > 0
           ? p.selectedFeatures : state.selectedFeatures,
         timePeriods: {
@@ -112,6 +115,8 @@ function formReducer(state: FormState, action: FormAction): FormState {
     }
     case 'SET_FEATURES':
       return { ...state, selectedFeatures: action.payload };
+    case 'SET_FEATURE_MODE':
+      return { ...state, featureMode: action.payload };
     case 'SET_TIME':
       return { ...state, timePeriods: { ...state.timePeriods, [action.key]: action.value } };
     case 'SET_TARGET':
@@ -144,6 +149,7 @@ export const ModelTrainingPage: React.FC = () => {
   // ── useReducer：草稿持久化的 7 字段 ──
   const [formState, dispatch] = useReducer(formReducer, {
     selectedFeatures: getDefaultFeaturesForMarket(currentMarket),
+    featureMode: "snapshot" as FeatureMode,
     timePeriods: DEFAULT_TIME_PERIODS,
     wfaConfig: { enabled: false, strategy: 'rolling', nWindows: 4, trainYears: 3, valMonths: 12, stepMonths: 12 },
     target: DEFAULT_TARGET,
@@ -178,7 +184,7 @@ export const ModelTrainingPage: React.FC = () => {
   const catalogSuggestionAppliedRef = useRef(false);
 
   // Derive individual fields from formState for inline use
-  const { selectedFeatures, timePeriods, wfaConfig, target, params, context, displayName, displayNameMode } = formState;
+  const { selectedFeatures, featureMode, timePeriods, wfaConfig, target, params, context, displayName, displayNameMode } = formState;
 
   const labelFormula = useMemo(() => buildLabelFormula(target), [target]);
   const effectiveTradeDate = useMemo(() => buildEffectiveTradeDate(target, timePeriods.test[0]), [target, timePeriods.test]);
@@ -191,7 +197,7 @@ export const ModelTrainingPage: React.FC = () => {
     catalogSuggestionAppliedRef.current = false;
   }, [currentMarket]);
 
-  const featureCount = selectedFeatures.length;
+  const featureCount = featureMode === "qlib_alpha158" ? 158 : selectedFeatures.length;
   const autoDisplayName = useMemo(
     () => buildAutoDisplayName(dayjs(), target, featureCount, undefined, currentMarket),
     [target, featureCount, currentMarket]
@@ -201,10 +207,10 @@ export const ModelTrainingPage: React.FC = () => {
   const testDays = useMemo(() => daysBetween(timePeriods.test), [timePeriods.test]);
   const totalDays = trainDays + valDays + testDays;
   const requestPreview = useMemo(
-    () => buildTrainingRequest(selectedFeatures, featureCategories, timePeriods, target, params, context, displayName, currentMarket, wfaConfig),
-    [selectedFeatures, featureCategories, timePeriods, target, params, context, displayName, currentMarket, wfaConfig]
+    () => buildTrainingRequest(selectedFeatures, featureCategories, timePeriods, target, params, context, displayName, currentMarket, wfaConfig, featureMode),
+    [selectedFeatures, featureMode, featureCategories, timePeriods, target, params, context, displayName, currentMarket, wfaConfig]
   );
-  const isReadyToTrain = selectedFeatures.length > 0 && target.horizonDays >= 1 && totalDays > 0;
+  const isReadyToTrain = (featureMode === "qlib_alpha158" || selectedFeatures.length > 0) && target.horizonDays >= 1 && totalDays > 0;
   const isTrainingInProgress =
     trainingStatus === 'running' ||
     ['pending', 'provisioning', 'running', 'waiting_callback'].includes((backendRunStatus || '').toLowerCase());
@@ -298,6 +304,7 @@ export const ModelTrainingPage: React.FC = () => {
       displayName,
       displayNameMode,
       selectedFeatures,
+      featureMode,
       timePeriods: {
         train: toISOStringRange(timePeriods.train),
         val: toISOStringRange(timePeriods.val),
@@ -311,7 +318,7 @@ export const ModelTrainingPage: React.FC = () => {
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
     setDraftSavedAt(draft.lastSavedAt);
-  }, [formState.draftHydrated, displayName, displayNameMode, selectedFeatures, timePeriods, target, params, context, wfaConfig]);
+  }, [formState.draftHydrated, displayName, displayNameMode, selectedFeatures, featureMode, timePeriods, target, params, context, wfaConfig]);
 
   const clearTimers = () => {
     timersRef.current.forEach(t => window.clearTimeout(t));
@@ -559,7 +566,7 @@ export const ModelTrainingPage: React.FC = () => {
 
                 <AnimatePresence mode="wait">
                   <motion.div key={currentStep} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.2 }}>
-                    {currentStep === 0 && <FeatureSelector categories={featureCategories} selectedFeatures={selectedFeatures} onChange={(f) => dispatch({ type: 'SET_FEATURES', payload: f })} loading={featureCatalogLoading} />}
+                    {currentStep === 0 && <div className="space-y-4"><div className="rounded-2xl border border-slate-200 bg-white p-4"><div className="text-sm font-semibold text-slate-800">特征模式</div><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => dispatch({ type: 'SET_FEATURE_MODE', payload: 'snapshot' })} className={clsx("rounded-lg border px-3 py-2 text-sm", featureMode === "snapshot" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600")}>自定义快照特征</button><button onClick={() => dispatch({ type: 'SET_FEATURE_MODE', payload: 'qlib_alpha158' })} className={clsx("rounded-lg border px-3 py-2 text-sm", featureMode === "qlib_alpha158" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600")}>Qlib 原生 Alpha158</button></div><p className="mt-2 text-xs text-slate-500">Alpha158 仅使用 Qlib 二进制 OHLCV + factor 数据，并固定使用 Qlib LightGBM；不会读取自定义特征快照。</p></div>{featureMode === "snapshot" ? <FeatureSelector categories={featureCategories} selectedFeatures={selectedFeatures} onChange={(f) => dispatch({ type: 'SET_FEATURES', payload: f })} loading={featureCatalogLoading} /> : <div className="rounded-2xl border border-blue-100 bg-blue-50 p-5 text-sm text-slate-700"><div className="font-semibold text-blue-800">已选择 Qlib Alpha158（158 个原生因子）</div><p className="mt-2">训练、预测与回测使用项目的 Qlib 数据目录；此模式不会因为扩展特征缺失而失败。</p></div>}</div>}
                     {currentStep === 1 && <TrainingTargetConfig target={target} timePeriods={timePeriods} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} onTimeChange={(k, v) => dispatch({ type: 'SET_TIME', key: k, value: v })} dataCoverage={dataCoverage} wfa={wfaConfig} onWfaChange={(w) => dispatch({ type: 'SET_WFA', payload: w })} />}
                     {currentStep === 2 && <ParameterConfig params={params} context={context} onParamsChange={(p) => dispatch({ type: 'SET_PARAMS', payload: p })} onContextChange={(c) => dispatch({ type: 'SET_CONTEXT', payload: c })} displayName={displayName} onDisplayNameChange={(n, m) => dispatch({ type: 'SET_DISPLAY_NAME', payload: { name: n, mode: m } })} autoDisplayName={autoDisplayName} market={currentMarket} />}
                     {currentStep === 3 && <TrainingConsole trainingStatus={trainingStatus} executionStage={executionStage} progress={progress} logs={logs} backendRunStatus={backendRunStatus} result={result} requestPreview={requestPreview} totalDays={totalDays} trainDays={trainDays} valDays={valDays} testDays={testDays} target={target} />}

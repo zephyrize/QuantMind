@@ -75,11 +75,7 @@ logs/
 *.db-shm
 
 # Qlib & Large Data Files
-db/qlib_data/**/*.bin
-db/qlib_data/**/*.data
-!db/qlib_data/
-!db/qlib_data/**/
-!db/qlib_data/**/*.txt
+db/qlib_data/
 db/qlib_bin/
 db/qlib_csv/
 db/*.tar.gz

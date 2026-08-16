@@ -18,9 +18,13 @@ QuantMind is a quantitative trading platform with Python backend (FastAPI) and E
 ## Commands
 
 ### Backend
+If the backend service is running locally, the default environment used is the conda environment for quantmind. If this environment does not exist, the task should be stopped and the user should be prompted whether they need to create the quantmind environment.
 ```bash
 # Start all services (Docker)
 docker-compose up -d
+
+# Local test conda environment
+conda activate quantmind
 
 # Run single service locally
 SERVICE_MODE=api python backend/main_oss.py

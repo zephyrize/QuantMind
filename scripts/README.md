@@ -31,6 +31,7 @@ Unified scripts directory for the QuantMind project, organized by functionality.
 - `scripts/data/processing/generate_rolling_pred_online.py`: Generate rolling predictions for online use.
 - `scripts/data/processing/merge_features_with_labels.py`: 将 `db/feature_snapshots/features_YYYY.parquet`（默认）或 `db/feature_snapshots/model_features_YYYY.parquet`（兼容）与 `db/csmar_data.duckdb` 的次日收益率标签做高性能合并，输出更新后的 `db/feature_snapshots/model_features_YYYY.parquet`，并自动执行去重与质量校验报告生成。
 - `scripts/data/ingestion/update_qlib_sh_sz_from_baostock.py`: 使用 Baostock 对 `db/qlib_data` 做 SH/SZ 日线增量补数（默认 dry-run，`--apply` 才写入）。会同步更新 `calendars/day.txt` 与 `instruments/*.txt` 的 SH/SZ 截止日期。BJ 不在该脚本支持范围内。
+- `scripts/data/ingestion/sync_stockdb_to_qlib.py`: 从 `backend/.env` 配置的本机 StockDB 拉取 A 股日 K 与复权数据，构建或增量更新 `db/qlib_data`。写入 Qlib 原生 `open/high/low/close/vwap/volume/amount/factor` 字段，供原生 Alpha158 训练与 Qlib 回测使用；默认 dry-run，`--apply` 才落盘。
 - `scripts/data/ingestion/sync_market_data_daily_from_baostock.py`: 使用 Baostock 同步 `market_data_daily`，会自动按表结构选择“基础字段模式”或 `feature_0..N` 模式写入（默认 dry-run，`--apply` 写库）。
 - `scripts/training/sync_feature_catalog_to_db.py`: 将 `config/features/model_training_feature_catalog_v1.json` 同步到 PostgreSQL 特征注册表（`qm_feature_category/qm_feature_definition/qm_feature_set_version/qm_feature_set_item`），默认会把同步版本置为 `active` 并将其他 active 版本置为 `inactive`；支持 `--dry-run` 预检。
 
@@ -75,6 +76,47 @@ python scripts/data/processing/merge_features_with_labels.py --force
 # 仅处理指定年份
 python scripts/data/processing/merge_features_with_labels.py --years 2025 --force
 ```
+
+### StockDB → Qlib 离线同步
+
+该任务只生成本地 `db/qlib_data`，不修改 QuantDB，也不会改变运行时的 QuantDB 优先路由。连接地址从 `backend/.env` 读取；未设置时为 `localhost:7899`：
+
+```dotenv
+STOCKDB_HOST=localhost
+STOCKDB_PORT=7899
+STOCKDB_HTTP_TIMEOUT_SECONDS=15
+```
+
+首次构建前可先做小范围预检；不带 `--apply` 不会创建或覆盖任何 Qlib 文件：
+
+```bash
+conda run --no-capture-output -n quantmind python \
+  scripts/data/ingestion/sync_stockdb_to_qlib.py \
+  --start 2016-01-01 --max-symbols 10
+```
+
+确认预检后执行全量构建。新目录会先完整生成于临时路径，成功后再替换 `db/qlib_data`：
+
+```bash
+conda run --no-capture-output -n quantmind python \
+  scripts/data/ingestion/sync_stockdb_to_qlib.py \
+  --start 2016-01-01 --apply
+```
+
+后续每日执行同一条不带日期的命令即可追加交易日；遇到历史数据补录时显式加 `--rebuild`，避免已有 `.bin` 的日历索引发生位移：
+
+```bash
+# 每日增量（默认从现有 day.txt 的下一个自然日开始）
+conda run --no-capture-output -n quantmind python \
+  scripts/data/ingestion/sync_stockdb_to_qlib.py --apply
+
+# 历史回补或完全重建
+conda run --no-capture-output -n quantmind python \
+  scripts/data/ingestion/sync_stockdb_to_qlib.py \
+  --start 2016-01-01 --rebuild --apply
+```
+
+可用 `scripts/data/processing/inspect_qlib_bin.py --symbol SH600000 --field close` 解析生成的 `.bin`，并以 `--compare` 对比两份文件。
 
 ## Operations & CI
 - `scripts/ops/ci/p2_ci_quality_gate.py`: CI quality gate for isolation and smoke tests.

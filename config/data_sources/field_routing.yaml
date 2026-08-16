@@ -21,19 +21,19 @@ markets:
     daily_kline:
       tier: T1
       primary: quantdb_local
-      fallbacks: []
-      consensus: true
+      fallbacks: [stockdb]
+      consensus: false
       cleanup: true
     adj_factor:
       tier: T1
       primary: quantdb_local
-      fallbacks: []
-      consensus: true
+      fallbacks: [stockdb]
+      consensus: false
       cleanup: true
     minute_kline:
       tier: T2
       primary: quantdb_local
-      fallbacks: []
+      fallbacks: [stockdb]
       consensus: false
       cleanup: true
     index_kline:
@@ -51,7 +51,7 @@ markets:
     valuation:
       tier: T1
       primary: quantdb_local
-      fallbacks: []
+      fallbacks: [stockdb]
       consensus: false
       cleanup: true
     dividend:
@@ -75,13 +75,13 @@ markets:
     stock_list:
       tier: T1
       primary: quantdb_local
-      fallbacks: []
+      fallbacks: [stockdb]
       consensus: false
       cleanup: false
     calendar:
       tier: T1
       primary: quantdb_local
-      fallbacks: []
+      fallbacks: [stockdb]
       consensus: false
       cleanup: false
     technical_indicators:
