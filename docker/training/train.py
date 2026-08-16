@@ -3079,7 +3079,18 @@ def _run_qlib_alpha158_training(cfg: dict[str, Any], hardware: dict[str, Any]) -
     horizon = int(label_cfg.get("target_horizon_days") or 1)
     label_expression = f"Ref($close, -{horizon + 1})/Ref($close, -1) - 1"
     segments = {name: tuple(split_cfg[name]) for name in split_names}
-    qlib.init(provider_uri=provider_uri)
+    tracking_uri = f"sqlite:///{WORKSPACE / 'qlib_mlflow.db'}"
+    qlib.init(
+        provider_uri=provider_uri,
+        exp_manager={
+            "class": "MLflowExpManager",
+            "module_path": "qlib.workflow.expm",
+            "kwargs": {
+                "uri": tracking_uri,
+                "default_exp_name": "quantmind_training",
+            },
+        },
+    )
     handler = Alpha158(
         instruments=str(data_cfg.get("qlib_universe") or "all"),
         start_time=segments["train"][0], end_time=segments["test"][1],
