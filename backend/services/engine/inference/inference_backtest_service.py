@@ -797,6 +797,7 @@ def run_inference_backtest(
     data_dir: Path | None = None,
     config: StrategyConfig | None = None,
     signal_provider: Any = None,
+    trading_dates: list[str] | None = None,
 ) -> BacktestResult:
     """运行推理回测。
 
@@ -809,12 +810,15 @@ def run_inference_backtest(
 
     data_dir = data_dir or PROJECT_ROOT / "db" / "feature_snapshots"
 
-    # 1. 获取交易日序列
-    from .data_loader import get_available_dates
+    # 1. 获取交易日序列。调用方传入 Qlib 日历时，不再错误扫描快照 parquet。
+    if trading_dates is None:
+        from .data_loader import get_available_dates
 
-    trade_dates = get_available_dates(
-        data_dir=data_dir, start_date=start_date, end_date=end_date
-    )
+        trade_dates = get_available_dates(
+            data_dir=data_dir, start_date=start_date, end_date=end_date
+        )
+    else:
+        trade_dates = list(trading_dates)
     if not trade_dates:
         return BacktestResult(
             status="error",
@@ -881,10 +885,43 @@ def run_inference_backtest(
     )
 
 
+def build_qlib_alpha158_signal_provider(
+    model_dir: Path | str,
+    provider_uri: Path | str,
+    trading_dates: list[str],
+):
+    """Build a date-indexed real-time signal provider for native Alpha158.
+
+    Scores are materialized once for the requested period.  This preserves the
+    native Qlib feature pipeline while avoiding a Python/Qlib initialization for
+    every simulated trading day.
+    """
+    if not trading_dates:
+        return lambda _trade_date: pd.DataFrame(columns=["symbol", "score"])
+
+    from .qlib_alpha158 import predict_alpha158_scores
+
+    score_frame = predict_alpha158_scores(
+        model_dir=model_dir,
+        start_date=trading_dates[0],
+        end_date=trading_dates[-1],
+        provider_uri=provider_uri,
+    )
+    by_date = {
+        str(trade_date): group[["symbol", "score"]].reset_index(drop=True)
+        for trade_date, group in score_frame.groupby("trade_date", sort=False)
+    }
+
+    def provider(trade_date: str) -> pd.DataFrame:
+        return by_date.get(trade_date, pd.DataFrame(columns=["symbol", "score"]))
+
+    return provider
+
+
 def _realtime_signals(trade_date: str, data_dir: Path) -> pd.DataFrame | None:
-    """实时推理信号提供者（占位，实际由 API 层注入）。"""
-    raise NotImplementedError(
-        "realtime 信号需要注入推理引擎；stored 模式请传 signal_provider"
+    """Compatibility guard for callers that failed to supply a model provider."""
+    raise RuntimeError(
+        "实时推理需要由 API 按模型数据源注入信号提供者"
     )
 
 

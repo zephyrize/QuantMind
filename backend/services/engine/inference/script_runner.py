@@ -59,6 +59,7 @@ _PARQUET_TEMPLATE_MARKERS = (
     "QuantMind Parquet 数据源推理脚本 (inference.py 模板)",
     "QuantMind Parquet 数据源推理脚本\n=================================\n由训练流水线自动生成",
 )
+_QLIB_ALPHA158_TEMPLATE_MARKER = "QuantMind 原生 Qlib Alpha158 推理脚本（平台托管模板）"
 
 # 默认超时 3600 秒（1 小时），可通过环境变量覆盖
 _SCRIPT_TIMEOUT_SEC = int(os.getenv("INFERENCE_SCRIPT_TIMEOUT_SEC", "3600"))
@@ -319,6 +320,52 @@ class InferenceScriptRunner:
             logger.warning("[InferenceScriptRunner] 自动写入推理脚本失败: %s", exc)
             return False
 
+    def _is_qlib_alpha158_model(self, metadata: dict | None = None) -> bool:
+        """Return whether this runner owns a native Qlib Alpha158 artifact."""
+        metadata = metadata if metadata is not None else self._read_primary_metadata()
+        return (
+            str(metadata.get("data_source") or "").lower()
+            in {"qlib", "qlib_bin", "bin"}
+            and str(metadata.get("feature_mode") or "").lower() == "qlib_alpha158"
+            and str(metadata.get("model_type") or "").lower() == "lightgbm"
+        )
+
+    def _try_deploy_qlib_alpha158_template(self, script_path: Path) -> bool:
+        """Install the managed native-Qlib script for Alpha158 model artifacts."""
+        template_path = (
+            Path(__file__).parent / "templates" / "inference_qlib_alpha158.py"
+        )
+        if not template_path.is_file():
+            logger.warning(
+                "[InferenceScriptRunner] Alpha158 推理模板不存在: %s", template_path
+            )
+            return False
+        try:
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text(
+                template_path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            logger.info(
+                "[InferenceScriptRunner] 已自动写入 Alpha158 推理脚本: %s",
+                script_path,
+            )
+            return True
+        except Exception as exc:
+            logger.warning("[InferenceScriptRunner] 自动写入 Alpha158 推理脚本失败: %s", exc)
+            return False
+
+    def _ensure_qlib_alpha158_template_script(self, script_path: Path) -> bool:
+        """Keep platform-managed Alpha158 scripts aligned with the current runtime."""
+        if not script_path.is_file():
+            return self._try_deploy_qlib_alpha158_template(script_path)
+        try:
+            content = script_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return False
+        if _QLIB_ALPHA158_TEMPLATE_MARKER not in content:
+            return True
+        return self._try_deploy_qlib_alpha158_template(script_path)
+
     @staticmethod
     def _is_managed_parquet_template(script_path: Path) -> bool:
         if not script_path.is_file():
@@ -454,6 +501,7 @@ class InferenceScriptRunner:
                 return {
                     "ready": False,
                     "detail": f"qlib_data={provider_uri}, date={trade_date} (未在日历中找到，最后日期={last_date})",
+                    "latest_available_date": last_date if last_date != "empty" else None,
                 }
         except Exception as exc:
             return {"ready": False, "detail": f"qlib 日历读取失败: {exc}"}
@@ -595,6 +643,12 @@ class InferenceScriptRunner:
                 part for part in (root_text, curr_python_path) if part
             )
         env["QUANTMIND_PROJECT_ROOT"] = root_text
+        warning_filter = "ignore::UserWarning:pydantic._internal._fields"
+        existing_filters = env.get("PYTHONWARNINGS", "")
+        if warning_filter not in existing_filters:
+            env["PYTHONWARNINGS"] = ",".join(
+                value for value in (existing_filters, warning_filter) if value
+            )
 
         return env
 
@@ -833,6 +887,13 @@ class InferenceScriptRunner:
                     "[InferenceScriptRunner] parquet 模型自动注入推理脚本: %s",
                     script_path,
                 )
+            elif self._is_qlib_alpha158_model(primary_meta) and self._try_deploy_qlib_alpha158_template(
+                script_path
+            ):
+                logger.info(
+                    "[InferenceScriptRunner] Alpha158 模型自动注入推理脚本: %s",
+                    script_path,
+                )
             else:
                 run_id = f"run_{date.replace('-', '')}_{uuid.uuid4().hex[:8]}"
                 fallback_reason = f"主模型推理脚本不存在: {script_path}"
@@ -868,6 +929,13 @@ class InferenceScriptRunner:
         ):
             logger.warning(
                 "[InferenceScriptRunner] parquet 模型模板同步失败，继续使用现有脚本: %s",
+                script_path,
+            )
+        elif self._is_qlib_alpha158_model(primary_meta) and not self._ensure_qlib_alpha158_template_script(
+            script_path
+        ):
+            logger.warning(
+                "[InferenceScriptRunner] Alpha158 模型模板同步失败，继续使用现有脚本: %s",
                 script_path,
             )
 

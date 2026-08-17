@@ -20,6 +20,7 @@ from sqlalchemy import text
 from backend.services.api.user_app.middleware.auth import require_admin
 from backend.services.engine.inference.script_runner import InferenceScriptRunner
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.env_loader import PROJECT_ROOT
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 from backend.shared.trading_calendar import calendar_service
 
@@ -1155,6 +1156,17 @@ class InferenceBacktestRequest(BaseModel):
     model_config = {"protected_namespaces": ()}
 
 
+def _resolve_backtest_model_dir(model_id: str) -> Path | None:
+    """Find a registered user or production model directory by its directory ID."""
+    for root in (Path(MODELS_ROOT) / "users", Path(MODELS_PRODUCTION)):
+        if not root.exists():
+            continue
+        for candidate in root.rglob(model_id):
+            if candidate.is_dir() and (candidate / "metadata.json").is_file():
+                return candidate
+    return None
+
+
 @router.post("/inference-backtest", summary="推理回测（选股策略事件驱动）")
 async def run_inference_backtest(
     request: InferenceBacktestRequest,
@@ -1168,7 +1180,14 @@ async def run_inference_backtest(
     """
     from backend.services.engine.inference.inference_backtest_service import (
         StrategyConfig,
+        build_qlib_alpha158_signal_provider,
         run_inference_backtest,
+    )
+    from backend.services.engine.inference.qlib_alpha158 import (
+        get_qlib_trading_dates,
+        is_qlib_alpha158_model,
+        read_metadata,
+        resolve_alpha158_provider_uri,
     )
 
     # 构建策略配置
@@ -1192,26 +1211,61 @@ async def run_inference_backtest(
         signal_mode=request.signal_mode,
     )
 
-    data_dir = Path(os.getcwd()) / "db" / "feature_snapshots"
+    model_dir = _resolve_backtest_model_dir(request.model_id)
+    if model_dir is None:
+        raise HTTPException(status_code=404, detail=f"模型 {request.model_id} 未找到")
+    metadata = read_metadata(model_dir)
+    data_source = str(metadata.get("data_source") or "").lower()
+    trading_dates: list[str] | None = None
+    if data_source in {"qlib", "qlib_bin", "bin"}:
+        provider_uri = resolve_alpha158_provider_uri(metadata)
+        data_dir = Path(provider_uri)
+        trading_dates = get_qlib_trading_dates(
+            provider_uri, request.start_date, request.end_date
+        )
+        if not trading_dates:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Qlib 日期范围 {request.start_date} ~ {request.end_date} 内无可用数据"
+                ),
+            )
+    else:
+        data_dir = PROJECT_ROOT / "db" / "feature_snapshots"
 
-    # 信号提供者：stored 模式读 engine_signal_scores
-    signal_provider = None
-    if request.signal_mode == "stored":
-        signal_provider = _make_stored_signal_provider(request.model_id)
+    if request.signal_mode not in {"stored", "realtime"}:
+        raise HTTPException(status_code=422, detail="signal_mode 仅支持 stored 或 realtime")
+    if request.signal_mode == "realtime" and not is_qlib_alpha158_model(metadata):
+        raise HTTPException(
+            status_code=422,
+            detail="当前仅原生 Qlib Alpha158 模型支持逐日实时推理回测",
+        )
 
     try:
         import asyncio
 
-        result = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: run_inference_backtest(
+        def _run() -> Any:
+            if request.signal_mode == "stored":
+                signal_provider = _make_stored_signal_provider(request.model_id)
+            else:
+                signal_provider = build_qlib_alpha158_signal_provider(
+                    model_dir=model_dir,
+                    provider_uri=data_dir,
+                    trading_dates=trading_dates or [],
+                )
+            return run_inference_backtest(
                 model_id=request.model_id,
                 start_date=request.start_date,
                 end_date=request.end_date,
                 data_dir=data_dir,
                 config=config,
                 signal_provider=signal_provider,
-            ),
+                trading_dates=trading_dates,
+            )
+
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            _run,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"推理回测执行失败: {exc}") from exc

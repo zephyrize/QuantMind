@@ -3150,6 +3150,18 @@ def _run_qlib_alpha158_training(cfg: dict[str, Any], hardware: dict[str, Any]) -
     booster.save_model(str(workspace / "model.lgb"))
     pred_frame.rename(columns={"instrument": "symbol", "score": "pred"}).to_parquet(workspace / "pred.parquet", engine="pyarrow", compression="zstd", index=False)
     pred_frame[["datetime", "instrument", "score"]].set_index(["datetime", "instrument"]).to_pickle(workspace / "pred.pkl")
+    # 训练产物自带一个极薄的运行时入口。实际 Alpha158 特征构造留在服务端
+    # 的共享模块中，确保模型管理页、手动推理和回测使用同一口径。
+    (workspace / "inference.py").write_text(
+        '''#!/usr/bin/env python3
+"""QuantMind 原生 Qlib Alpha158 推理脚本（平台托管模板）。"""
+from backend.services.engine.inference.templates.inference_qlib_alpha158 import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+''',
+        encoding="utf-8",
+    )
 
     metadata = {
         "run_id": cfg.get("run_id", "unknown"), "job_name": cfg.get("job_name", "unnamed"),
@@ -3172,7 +3184,7 @@ def _run_qlib_alpha158_training(cfg: dict[str, Any], hardware: dict[str, Any]) -
     return {
         "status": "completed", "run_id": metadata["run_id"], "job_name": metadata["job_name"],
         "metrics": {"train": {"rmse": metrics["train"]["rmse"], "auc": metrics["train"]["auc"]}, "val": {"rmse": metrics["valid"]["rmse"], "auc": metrics["valid"]["auc"]}, "test": {"rmse": metrics["test"]["rmse"], "auc": metrics["test"]["auc"]}},
-        "artifacts": [{"name": name, "local": f"/workspace/{name}"} for name in ("model.lgb", "pred.parquet", "pred.pkl", "metadata.json", "config.yaml", "result.json")],
+        "artifacts": [{"name": name, "local": f"/workspace/{name}"} for name in ("model.lgb", "pred.parquet", "pred.pkl", "metadata.json", "inference.py", "config.yaml", "result.json")],
         "summary": {"status": "训练完成", "message": f"Qlib 原生 Alpha158 训练完成，val_icir={metrics['valid']['rank_icir']:.4f}"},
         "metadata": metadata, "error": "", "logs": f"Qlib Alpha158 complete; val_icir={metrics['valid']['rank_icir']:.6f}",
     }

@@ -421,7 +421,7 @@ def _get_model_data_dir(model_dir: Path, metadata: dict | None = None) -> str:
     从模型配置中获取推理数据目录。
 
     优先级：
-    1. metadata.json 中的 qlib_data_path 字段（绝对路径）
+    1. metadata.json 中的 qlib_provider_uri / qlib_data_path 字段（绝对路径）
     2. metadata.json 中的 context.market 字段映射到对应 qlib 数据目录
     3. metadata.json 中的 data_source 字段判断：
        - "qlib" -> db/qlib_data
@@ -430,9 +430,10 @@ def _get_model_data_dir(model_dir: Path, metadata: dict | None = None) -> str:
     """
     # 优先读取 metadata 中的 qlib_data_path
     if metadata:
-        qlib_data_path = metadata.get("qlib_data_path")
-        if qlib_data_path:
-            return qlib_data_path
+        for key in ("qlib_provider_uri", "qlib_data_path"):
+            qlib_data_path = metadata.get(key)
+            if qlib_data_path and Path(str(qlib_data_path)).is_dir():
+                return str(qlib_data_path)
 
         # 根据 context.market 映射到对应 qlib 数据目录
         context = metadata.get("context")
@@ -451,9 +452,10 @@ def _get_model_data_dir(model_dir: Path, metadata: dict | None = None) -> str:
     if meta_file.is_file():
         try:
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
-            qlib_data_path = meta.get("qlib_data_path")
-            if qlib_data_path:
-                return qlib_data_path
+            for key in ("qlib_provider_uri", "qlib_data_path"):
+                qlib_data_path = meta.get(key)
+                if qlib_data_path and Path(str(qlib_data_path)).is_dir():
+                    return str(qlib_data_path)
 
             context = meta.get("context")
             if isinstance(context, dict):
@@ -850,12 +852,15 @@ def _build_precheck_items(
     )
 
     script_path = model_dir / runner.primary_script_name
-    # parquet 模型：脚本缺失时自动注入模板，无需阻断
+    # 平台托管的 parquet / 原生 Qlib Alpha158 模型缺失脚本时自动注入。
     script_exists = runner.check_script_exists()
     if not script_exists:
         primary_meta = runner._read_primary_metadata()
         if str(primary_meta.get("data_source") or "").lower() == "parquet":
             if runner._try_deploy_parquet_template(script_path):
+                script_exists = True
+        elif runner._is_qlib_alpha158_model(primary_meta):
+            if runner._try_deploy_qlib_alpha158_template(script_path):
                 script_exists = True
     items.append(
         {
