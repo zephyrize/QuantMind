@@ -29,6 +29,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+# Qlib and its PyTorch model modules import MLflow lazily.  The installed
+# MLflow version defines ``PromptModelConfig.model_name``, which is harmless
+# but triggers this Pydantic v2 compatibility warning on every such import.
+# Register the *exact* third-party warning at process startup so all training
+# paths (Alpha158 and Qlib deep-learning models) stay free of log noise.
+warnings.filterwarnings(
+    "ignore",
+    message=r'^Field "model_name" has conflict with protected namespace "model_"\.',
+    category=UserWarning,
+    module=r"pydantic\._internal\._fields",
+)
+
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
@@ -3062,22 +3074,11 @@ def train_stacking(
 def _run_qlib_alpha158_training(cfg: dict[str, Any], hardware: dict[str, Any]) -> dict[str, Any]:
     """Train native Qlib Alpha158 without touching the snapshot-Parquet workflow."""
     try:
-        # Qlib imports MLflow.  The installed MLflow release declares a
-        # ``model_name`` Pydantic field, which triggers a harmless Pydantic v2
-        # compatibility warning for every training subprocess.  It is a
-        # third-party import-time warning and does not affect the model.
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r'^Field "model_name" has conflict with protected namespace "model_"\.',
-                category=UserWarning,
-                module=r"pydantic\._internal\._fields",
-            )
-            import qlib
-            from qlib.contrib.data.handler import Alpha158
-            from qlib.contrib.model.gbdt import LGBModel
-            from qlib.data.dataset import DatasetH
-            from qlib.data.dataset.handler import DataHandlerLP
+        import qlib
+        from qlib.contrib.data.handler import Alpha158
+        from qlib.contrib.model.gbdt import LGBModel
+        from qlib.data.dataset import DatasetH
+        from qlib.data.dataset.handler import DataHandlerLP
     except ImportError as exc:
         raise RuntimeError("Qlib Alpha158 dependencies are unavailable in the training image") from exc
 
