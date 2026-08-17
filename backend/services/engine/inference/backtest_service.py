@@ -21,6 +21,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
+from backend.shared.env_loader import resolve_project_path
+
 from .config import PRODUCTION_MODELS_DIR
 from .data_loader import (
     FORWARD_RETURN_COL,
@@ -34,8 +36,11 @@ from .trading_cost import CostModel
 
 logger = logging.getLogger(__name__)
 
-# History storage directory（容器内为 /app/db/...，本地开发用相对路径）
-_HISTORY_DIR = Path(os.getenv("QM_BACKTEST_HISTORY_DIR", "db/backtest_history"))
+# History storage directory（本地与容器都相对项目根解析）
+_HISTORY_DIR = resolve_project_path(
+    os.getenv("QM_BACKTEST_HISTORY_DIR"),
+    default=Path("db") / "backtest_history",
+)
 
 _TRADING_DAYS_PER_YEAR = 252
 

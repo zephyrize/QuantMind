@@ -28,6 +28,7 @@ from backend.services.engine.inference.router_service import InferenceRouterServ
 from backend.services.engine.inference.script_runner import InferenceScriptRunner
 from backend.shared.auth import get_internal_call_secret
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.env_loader import PROJECT_ROOT, resolve_project_path
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 from backend.shared.trading_calendar import calendar_service
 try:
@@ -39,8 +40,11 @@ from .db import Base, DataFileRecord, ModelRecord, TrainingJobRecord  # noqa: F4
 
 router = APIRouter(dependencies=[Depends(require_admin)])  # 路由器级认证兜底
 
-# 模型存放根目录（扫描所有子目录）
-MODELS_ROOT = os.path.abspath(os.path.join(os.getcwd(), "models"))
+# 模型存放根目录（扫描所有子目录）。不要依赖服务启动时的 cwd，
+# 本地与容器都由 PROJECT_ROOT 解析为同一套项目目录结构。
+MODELS_ROOT = str(
+    resolve_project_path(os.getenv("MODELS_ROOT"), default=Path("models"))
+)
 
 # Engine 服务地址（与 engine_proxy 保持一致）
 _ENGINE_BASE_URL = os.getenv("ENGINE_SERVICE_URL", "http://127.0.0.1:8001").rstrip("/")
@@ -50,9 +54,14 @@ _INFERENCE_LOCK_TTL_SEC = int(os.getenv("INFERENCE_LOCK_TTL_SEC", "1800"))
 _INFERENCE_LOCK_KEY_PREFIX = "qm:lock:inference:daily"
 # 生产模型目录（兼容旧逻辑）
 MODELS_PRODUCTION = os.path.join(MODELS_ROOT, "production", "model_qlib")
-FEATURE_CATALOG_FALLBACK = os.path.join(os.getcwd(), "config", "features", "model_training_feature_catalog_v1.json")
+FEATURE_CATALOG_FALLBACK = str(
+    PROJECT_ROOT / "config" / "features" / "model_training_feature_catalog_v1.json"
+)
 FEATURE_SNAPSHOT_DIR = Path(
-    os.getenv("TRAINING_LOCAL_DATA_PATH", str(Path(os.getcwd()) / "db" / "feature_snapshots"))
+    resolve_project_path(
+        os.getenv("TRAINING_LOCAL_DATA_PATH"),
+        default=Path("db") / "feature_snapshots",
+    )
 )
 FEATURE_COVERAGE_CACHE_TTL_SEC = max(5, int(os.getenv("FEATURE_COVERAGE_CACHE_TTL_SEC", "300")))
 _feature_coverage_cache_data: dict[str, Any] | None = None

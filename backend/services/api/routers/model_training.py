@@ -37,6 +37,7 @@ from backend.services.engine.services.model_inference_batch_persistence import (
 )
 from backend.services.engine.services.model_inference_persistence import model_inference_persistence
 from backend.shared.database_manager_v2 import get_session
+from backend.shared.env_loader import resolve_project_path
 from backend.shared.inference_stats import compute_score_distribution
 from backend.shared.model_registry import model_registry_service
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
@@ -140,9 +141,11 @@ def compute_market_signals(signals: list[dict[str, Any]]) -> dict[str, Any]:
         },
     }
 
-# models/production 目录（相对项目根）
-_PROJECT_ROOT = Path(__file__).resolve().parents[4]
-_PRODUCTION_DIR = Path(os.getenv("MODELS_PRODUCTION_ROOT", str(_PROJECT_ROOT / "models" / "production")))
+# models/production 目录（始终相对项目根解析）
+_PRODUCTION_DIR = resolve_project_path(
+    os.getenv("MODELS_PRODUCTION_ROOT"),
+    default=Path("models") / "production",
+)
 
 
 def _load_production_models() -> list[dict[str, Any]]:

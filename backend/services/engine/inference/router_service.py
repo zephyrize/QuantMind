@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from backend.shared.env_loader import PROJECT_ROOT, resolve_project_path
 from backend.shared.model_registry import model_registry_service
 
 from .script_runner import ExecutionResult, InferenceScriptRunner
@@ -77,7 +78,7 @@ def _get_model_data_dir(model_dir: Path) -> str:
         except Exception:
             pass
 
-    return "db/feature_snapshots"
+    return str(PROJECT_ROOT / "db" / "feature_snapshots")
 
 
 class InferenceRouterService:
@@ -87,10 +88,30 @@ class InferenceRouterService:
         self.inference_service = inference_service or InferenceService()
         self.primary_model_id = os.getenv("PRIMARY_MODEL_ID", "model_qlib")
         self.fallback_model_id = os.getenv("FALLBACK_MODEL_ID", "alpha158")
-        self.primary_model_dir = os.getenv("MODELS_PRODUCTION", "/app/models/production/model_qlib")
-        self.fallback_model_dir = os.getenv("MODELS_FALLBACK_PRODUCTION", "/app/models/production/alpha158")
-        self.primary_data_source = os.getenv("QLIB_PRIMARY_DATA_PATH", "db/feature_snapshots")
-        self.fallback_data_source = os.getenv("QLIB_FALLBACK_DATA_PATH", "db/qlib_data")
+        self.primary_model_dir = str(
+            resolve_project_path(
+                os.getenv("MODELS_PRODUCTION"),
+                default=Path("models") / "production" / self.primary_model_id,
+            )
+        )
+        self.fallback_model_dir = str(
+            resolve_project_path(
+                os.getenv("MODELS_FALLBACK_PRODUCTION"),
+                default=Path("models") / "production" / self.fallback_model_id,
+            )
+        )
+        self.primary_data_source = str(
+            resolve_project_path(
+                os.getenv("QLIB_PRIMARY_DATA_PATH"),
+                default=Path("db") / "feature_snapshots",
+            )
+        )
+        self.fallback_data_source = str(
+            resolve_project_path(
+                os.getenv("QLIB_FALLBACK_DATA_PATH"),
+                default=Path("db") / "qlib_data",
+            )
+        )
 
     def _resolve_data_source(self, model_id: str, model_source: str = "") -> str:
         if model_id == self.fallback_model_id:

@@ -33,6 +33,7 @@ from backend.services.trade.simulation.services.local_market_data import (
     LocalMarketData,
     get_local_market_data,
 )
+from backend.shared.env_loader import resolve_project_path
 from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,10 @@ logger = logging.getLogger(__name__)
 
 def _resolve_model_dir(model_id: str | None = None) -> Path:
     """定位模型目录。优先 model_id 对应的子目录，否则主模型。"""
-    base = Path(os.getenv("MODELS_PRODUCTION", "/app/models/production"))
+    base = resolve_project_path(
+        os.getenv("MODELS_PRODUCTION_ROOT"),
+        default=Path("models") / "production",
+    )
     if model_id:
         candidate = base / model_id
         if candidate.is_dir():
@@ -60,7 +64,10 @@ def _resolve_model_dir(model_id: str | None = None) -> Path:
 
 
 def _resolve_data_dir() -> Path:
-    return Path(os.getenv("MODEL_TRAINING_DATA_DIR", "/app/db/feature_snapshots"))
+    return resolve_project_path(
+        os.getenv("MODEL_TRAINING_DATA_DIR"),
+        default=Path("db") / "feature_snapshots",
+    )
 
 
 def _load_metadata(model_dir: Path) -> dict[str, Any]:

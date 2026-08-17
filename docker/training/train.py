@@ -40,6 +40,11 @@ except ImportError:
     torch = None
 import yaml
 
+try:
+    from backend.shared.env_loader import PROJECT_ROOT
+except ImportError:
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -47,12 +52,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("quantmind.train")
 WORKSPACE = Path(os.getenv("TRAINING_WORKSPACE_DIR", "/workspace"))
-_INFERENCE_TEMPLATE = Path("/app/backend/services/engine/inference/templates/inference_parquet.py")
-if not _INFERENCE_TEMPLATE.is_file():
-    _INFERENCE_TEMPLATE = (
-        Path(__file__).resolve().parents[2]
-        / "backend/services/engine/inference/templates/inference_parquet.py"
-    )
+_INFERENCE_TEMPLATE = (
+    PROJECT_ROOT / "backend/services/engine/inference/templates/inference_parquet.py"
+)
 
 
 # ── 硬件环境检测 ──────────────────────────────────────────────────────────────
@@ -3703,7 +3705,7 @@ except ImportError:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", stream=sys.stderr)
 logger = logging.getLogger("inference_parquet")
 
-_DEFAULT_DATA_DIR = "/app/db/feature_snapshots"
+_DEFAULT_DATA_DIR = str(Path(os.getenv("QUANTMIND_PROJECT_ROOT", Path.cwd())) / "db" / "feature_snapshots")
 
 def parse_args():
     p = argparse.ArgumentParser()

@@ -254,7 +254,12 @@ async def _resolve_model_dir_for_user(
     import os as _os
 
     # 1. 生产模型目录
-    prod_base = Path(_os.getenv("MODELS_PRODUCTION", "/app/models/production"))
+    from backend.shared.env_loader import resolve_project_path
+
+    prod_base = resolve_project_path(
+        _os.getenv("MODELS_PRODUCTION_ROOT"),
+        default=Path("models") / "production",
+    )
     candidate = prod_base / model_id
     if candidate.is_dir():
         return _validate_model_dir(candidate, model_id, _json)

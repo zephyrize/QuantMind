@@ -805,7 +805,9 @@ def run_inference_backtest(
     """
     config = config or StrategyConfig()
     industry_map = load_shenwan_industry_map()
-    data_dir = data_dir or Path("/app/db/feature_snapshots")
+    from backend.shared.env_loader import PROJECT_ROOT
+
+    data_dir = data_dir or PROJECT_ROOT / "db" / "feature_snapshots"
 
     # 1. 获取交易日序列
     from .data_loader import get_available_dates

@@ -207,8 +207,11 @@ async def _query_market_data_readiness(
 
 def _check_inference_model_exists() -> tuple[bool, str]:
     """检查推理模型文件是否存在，不查询数据库。"""
-    production_dir = Path(
-        os.getenv("MODELS_PRODUCTION", "/app/models/production/model_qlib")
+    from backend.shared.env_loader import resolve_project_path
+
+    production_dir = resolve_project_path(
+        os.getenv("MODELS_PRODUCTION"),
+        default=Path("models") / "production" / "model_qlib",
     )
     if not production_dir.exists() or not production_dir.is_dir():
         return False, f"推理模型目录不存在: {production_dir}"

@@ -29,6 +29,7 @@ import yaml
 from backend.services.engine.training.training_log_stream import TrainingRunLogStream
 from backend.services.engine.training.orchestrator_base import TrainingOrchestrator, REGISTRY
 from backend.services.api.training_explain import DEFAULT_EXPLAIN_CFG
+from backend.shared.env_loader import PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ _DOCKER_NETWORK = os.getenv("TRAINING_DOCKER_NETWORK", "quantmind-network")
 _LOCAL_DATA_MOUNT_DIR = "/tmp/feature_snapshots"
 _QUANTDB_DATA_MOUNT_DIR = "/tmp/quantdb_data"
 _QLIB_DATA_MOUNT_DIR = "/tmp/qlib_data"
-_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+_PROJECT_ROOT = PROJECT_ROOT
 
 
 def _resolve_execution_mode() -> str:
@@ -759,12 +760,7 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         model_id = model_registry_service.build_model_id_from_run(run_id)
 
         # API 容器内的模型注册路径（用于回调后注册模型）
-        user_models_root = Path(model_registry_service.user_models_root)
-        internal_models_root = (
-            user_models_root
-            if user_models_root.is_absolute()
-            else Path("/app") / user_models_root
-        )
+        internal_models_root = Path(model_registry_service.user_models_root)
         internal_output_dir = internal_models_root / tenant_id / user_id / model_id
 
         # 训练容器工作目录：使用 /data 挂载点下的路径
@@ -773,8 +769,9 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         container_work_dir = Path("/data") / "training_jobs" / run_id
 
         host_output_dir = self._daemon_host_path(container_work_dir)
-        if Path("/app/db/feature_snapshots").exists():
-            container_local_data_path = Path("/app/db/feature_snapshots")
+        project_feature_dir = PROJECT_ROOT / "db" / "feature_snapshots"
+        if project_feature_dir.exists():
+            container_local_data_path = project_feature_dir
         else:
             container_local_data_path = Path("/data/feature_snapshots")
         local_data_host_path = self._daemon_host_path(container_local_data_path)
@@ -825,7 +822,7 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
             configured_qlib_uri = os.getenv("QLIB_PROVIDER_URI", "").strip()
             qlib_candidates = [
                 Path(configured_qlib_uri) if configured_qlib_uri else None,
-                Path("/app/db/qlib_data"),
+                PROJECT_ROOT / "db" / "qlib_data",
                 Path("/data/quantdb/.qlib_cache/cn_data"),
             ]
             qlib_source = next(
@@ -1151,12 +1148,7 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                         import shutil
                         from backend.shared.model_registry import model_registry_service
 
-                        user_models_root = Path(model_registry_service.user_models_root)
-                        internal_models_root = (
-                            user_models_root
-                            if user_models_root.is_absolute()
-                            else Path("/app") / user_models_root
-                        )
+                        internal_models_root = Path(model_registry_service.user_models_root)
                         internal_model_dir = (
                             internal_models_root / tenant_id / user_id / model_id
                         )
@@ -1185,8 +1177,6 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                                 prod_models_root = Path(
                                     model_registry_service.production_models_root
                                 )
-                                if not prod_models_root.is_absolute():
-                                    prod_models_root = Path("/app") / prod_models_root
                                 prod_model_dir = prod_models_root / model_id
                                 prod_model_dir.mkdir(parents=True, exist_ok=True)
 

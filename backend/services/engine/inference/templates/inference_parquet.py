@@ -64,7 +64,8 @@ logging.basicConfig(
 logger = logging.getLogger("inference_parquet")
 
 # ── 默认路径 ──────────────────────────────────────────────────────────────
-_DEFAULT_DATA_DIR = "/app/db/feature_snapshots"
+_PROJECT_ROOT = Path(os.getenv("QUANTMIND_PROJECT_ROOT", Path.cwd()))
+_DEFAULT_DATA_DIR = str(_PROJECT_ROOT / "db" / "feature_snapshots")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

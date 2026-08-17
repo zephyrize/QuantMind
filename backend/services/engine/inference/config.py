@@ -5,8 +5,9 @@ Configuration for AI Inference Service
 import os
 from pathlib import Path
 
+from backend.shared.env_loader import PROJECT_ROOT
+
 # Model Registry Paths
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
 MODELS_DIR = PROJECT_ROOT / "models"
 PRODUCTION_MODELS_DIR = MODELS_DIR / "production"
 CANDIDATE_MODELS_DIR = MODELS_DIR / "candidates"

@@ -40,7 +40,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("inference_ensemble")
 
-_DEFAULT_DATA_DIR = "/app/db/feature_snapshots"
+_PROJECT_ROOT = Path(os.getenv("QUANTMIND_PROJECT_ROOT", Path.cwd()))
+_DEFAULT_DATA_DIR = str(_PROJECT_ROOT / "db" / "feature_snapshots")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -59,7 +60,9 @@ def load_ensemble_config(model_dir: Path, market: str = "CN") -> dict:
 
     # 自动发现：扫描 MODEL_DIR 的父目录下所有模型
     # 每个 horizon 选特征数最多的模型
-    models_base = Path(os.getenv("MODELS_USERS_DIR", "/app/models/users/default/10000001"))
+    model_dir = Path(os.getenv("MODEL_DIR", Path(__file__).parent))
+    default_models_base = model_dir.parents[2] if len(model_dir.parents) >= 3 else model_dir.parent
+    models_base = Path(os.getenv("MODELS_USERS_DIR", str(default_models_base)))
     best_per_horizon = {}
 
     # 扫描两级目录结构：

@@ -45,6 +45,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from backend.services.engine.services.event_stream import EngineSignalStreamPublisher
+from backend.shared.env_loader import PROJECT_ROOT, resolve_project_path
 
 logger = logging.getLogger(__name__)
 
@@ -125,13 +126,17 @@ class InferenceScriptRunner:
         resolved_primary = (
             primary_model_dir
             or models_production
-            or os.getenv("MODELS_PRODUCTION", "/app/models/production/model_qlib")
+            or resolve_project_path(
+                os.getenv("MODELS_PRODUCTION"),
+                default=Path("models") / "production" / "model_qlib",
+            )
         )
         self.primary_model_dir = Path(resolved_primary)
         self.fallback_model_dir = Path(
             fallback_model_dir
-            or os.getenv(
-                "MODELS_FALLBACK_PRODUCTION", "/app/models/production/alpha158"
+            or resolve_project_path(
+                os.getenv("MODELS_FALLBACK_PRODUCTION"),
+                default=Path("models") / "production" / "alpha158",
             )
         )
         self.primary_data_dir = self._normalize_provider_uri(
@@ -167,7 +172,7 @@ class InferenceScriptRunner:
 
         规则：
         1) 若能在候选路径中命中真实目录，返回该绝对路径；
-        2) 相对路径默认转换为 /app/<path>；
+        2) 相对路径默认转换为 PROJECT_ROOT/<path>；
         3) prefer_alpha158 时在候选列表头部追加 metadata 中的默认路径。
         """
         raw = str(provider_uri or "").strip()
@@ -180,7 +185,7 @@ class InferenceScriptRunner:
         if p.is_absolute():
             candidates.append(p)
         else:
-            candidates.append(Path("/app") / p)
+            candidates.append(PROJECT_ROOT / p)
             candidates.append(p)
 
         seen = set()
@@ -194,7 +199,7 @@ class InferenceScriptRunner:
 
         if p.is_absolute():
             return raw
-        return str(Path("/app") / p)
+        return str(PROJECT_ROOT / p)
 
     # ------------------------------------------------------------------
     # 公开方法
@@ -340,7 +345,10 @@ class InferenceScriptRunner:
         if data_source == "parquet":
             return str(
                 primary_meta.get("data_dir")
-                or os.getenv("MODEL_TRAINING_DATA_DIR", "/app/db/feature_snapshots")
+                or resolve_project_path(
+                    os.getenv("MODEL_TRAINING_DATA_DIR"),
+                    default=Path("db") / "feature_snapshots",
+                )
             )
         return str(os.getenv("QLIB_PRIMARY_DATA_PATH", "db/qlib_data"))
 
@@ -354,7 +362,10 @@ class InferenceScriptRunner:
         # 解析 parquet 数据目录（优先 metadata 中的 data_dir，否则用默认路径）
         parquet_dir = Path(
             meta.get("data_dir")
-            or os.getenv("MODEL_TRAINING_DATA_DIR", "/app/db/feature_snapshots")
+            or resolve_project_path(
+                os.getenv("MODEL_TRAINING_DATA_DIR"),
+                default=Path("db") / "feature_snapshots",
+            )
         )
 
         # Market-aware parquet file resolution
@@ -575,10 +586,15 @@ class InferenceScriptRunner:
         if "/usr/local/bin" not in env.get("PATH", ""):
             env["PATH"] = "/usr/local/bin:" + env.get("PATH", "")
 
-        # 强制设置 PYTHONPATH
+        # 推理模板可能位于 models/users/...，故以项目根而非脚本目录
+        # 解析内部模块。本地与 Docker 均使用同一 PROJECT_ROOT。
         curr_python_path = env.get("PYTHONPATH", "")
-        if "/app" not in curr_python_path:
-            env["PYTHONPATH"] = f"/app:{curr_python_path}".strip(":")
+        root_text = str(PROJECT_ROOT)
+        if root_text not in curr_python_path.split(os.pathsep):
+            env["PYTHONPATH"] = os.pathsep.join(
+                part for part in (root_text, curr_python_path) if part
+            )
+        env["QUANTMIND_PROJECT_ROOT"] = root_text
 
         return env
 
@@ -915,7 +931,10 @@ class InferenceScriptRunner:
         primary_meta = self._read_primary_metadata()
         parquet_data_dir = str(
             primary_meta.get("data_dir")
-            or os.getenv("MODEL_TRAINING_DATA_DIR", "/app/db/feature_snapshots")
+            or resolve_project_path(
+                os.getenv("MODEL_TRAINING_DATA_DIR"),
+                default=Path("db") / "feature_snapshots",
+            )
         )
         env.update(
             {

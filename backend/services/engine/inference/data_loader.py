@@ -11,11 +11,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from backend.shared.env_loader import PROJECT_ROOT
+
 from .trading_cost import limit_threshold
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_DATA_DIR = "/app/db/feature_snapshots"
+_DEFAULT_DATA_DIR = str(PROJECT_ROOT / "db" / "feature_snapshots")
 
 # 前瞻标签列名。绝不能与任何特征列同名 —— 见 load_forward_labels 文档。
 FORWARD_RETURN_COL = "fwd_return"

@@ -28,6 +28,23 @@ ROOT_ENV_FILE = PROJECT_ROOT / ".env"
 BACKEND_ENV_FILE = BACKEND_DIR / ".env"
 
 
+def resolve_project_path(
+    value: str | os.PathLike[str] | None,
+    *,
+    default: str | os.PathLike[str],
+) -> Path:
+    """Resolve a configurable path relative to the repository root.
+
+    Absolute environment overrides remain supported.  Relative paths are
+    deliberately anchored to ``PROJECT_ROOT`` instead of the process working
+    directory so host Python and the Docker image resolve the same layout.
+    """
+
+    raw = str(value or "").strip()
+    candidate = Path(raw) if raw else Path(default)
+    return candidate if candidate.is_absolute() else PROJECT_ROOT / candidate
+
+
 def is_container_runtime() -> bool:
     """Return whether the process is running inside a container.
 

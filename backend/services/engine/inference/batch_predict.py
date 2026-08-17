@@ -17,8 +17,9 @@ import numpy as np
 import pandas as pd
 import qlib
 
+from backend.shared.env_loader import PROJECT_ROOT
+
 # 路径配置
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
 MODELS_DIR = PROJECT_ROOT / "models" / "production" / "model_qlib"
 OUTPUT_DIR = PROJECT_ROOT / "data" / "predictions"
 

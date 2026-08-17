@@ -15,6 +15,7 @@ from sqlalchemy import text
 from backend.shared.cos_service import get_cos_service
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.database_pool import get_db
+from backend.shared.env_loader import resolve_project_path
 
 logger = logging.getLogger(__name__)
 
@@ -47,17 +48,23 @@ class ResolvedModel:
 
 class ModelRegistryService:
     def __init__(self) -> None:
-        raw_user_models_root = Path(os.getenv("USER_MODELS_ROOT", "models/users"))
-        self.user_models_root = (
-            raw_user_models_root
-            if raw_user_models_root.is_absolute()
-            else Path("/app") / raw_user_models_root
+        self.user_models_root = resolve_project_path(
+            os.getenv("USER_MODELS_ROOT"),
+            default=Path("models") / "users",
         )
         self.primary_model_id = os.getenv("PRIMARY_MODEL_ID", "model_qlib")
         self.fallback_model_id = os.getenv("FALLBACK_MODEL_ID", "alpha158")
-        self.primary_model_dir = str(os.getenv("MODELS_PRODUCTION", "/app/models/production/model_qlib"))
+        self.primary_model_dir = str(
+            resolve_project_path(
+                os.getenv("MODELS_PRODUCTION"),
+                default=Path("models") / "production" / self.primary_model_id,
+            )
+        )
         self.fallback_model_dir = str(
-            os.getenv("MODELS_FALLBACK_PRODUCTION", "/app/models/production/alpha158")
+            resolve_project_path(
+                os.getenv("MODELS_FALLBACK_PRODUCTION"),
+                default=Path("models") / "production" / self.fallback_model_id,
+            )
         )
         self.production_models_root = Path(self.primary_model_dir).parent
 
