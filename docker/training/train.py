@@ -3195,7 +3195,9 @@ def main() -> int:
     try:
         if not cfg_path.exists():
             raise RuntimeError(f"Config file not found: {cfg_path}")
-        cfg = yaml.safe_load(cfg_path.read_text())
+        # 配置由本地编排器及 Docker 编排器统一以 UTF-8 写入。Windows
+        # 的默认编码是 GBK，不能依赖 Path.read_text() 的系统默认值。
+        cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
 
         run_id          = cfg.get("run_id", "unknown")
         job_name        = cfg.get("job_name", "unnamed")
