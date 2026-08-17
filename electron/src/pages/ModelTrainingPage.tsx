@@ -11,7 +11,11 @@ import {
 import dayjs, { Dayjs } from 'dayjs';
 import { clsx } from 'clsx';
 import { PAGE_LAYOUT } from '../config/pageLayout';
-import { modelTrainingService } from '../services/modelTrainingService';
+import {
+  ModelTrainingLogEntry,
+  ModelTrainingRunStatus,
+  modelTrainingService,
+} from '../services/modelTrainingService';
 import { useAppSelector } from '../store';
 import { selectCurrentMarket, AppMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
@@ -36,6 +40,22 @@ const TRAINING_MODULES = [
 
 const TRAINING_PAGE_BOTTOM_SAFE_CLASS = 'pb-[30px]';
 let draftRestoreNoticeShown = false;
+
+const TRAINING_STAGE_LABELS: Record<string, string> = {
+  queued: '已提交，等待调度',
+  starting: '正在启动训练环境',
+  loading_data: '正在加载与处理数据',
+  training: '正在训练模型',
+  saving_artifacts: '正在保存训练产物',
+  waiting_callback: '正在登记模型与回写结果',
+  completed: '训练完成',
+  failed: '训练失败',
+};
+
+const resolveTrainingStageLabel = (stage?: string, status?: string): string => {
+  const key = String(stage || status || 'queued').trim().toLowerCase();
+  return TRAINING_STAGE_LABELS[key] || '正在处理训练任务';
+};
 
 const MetricCard: React.FC<{
   label: string;
@@ -168,6 +188,7 @@ export const ModelTrainingPage: React.FC = () => {
   const [trainingStatus, setTrainingStatus] = useState<TrainingStatus>('draft');
   const [executionStage, setExecutionStage] = useState('待配置');
   const [backendRunStatus, setBackendRunStatus] = useState<string>('');
+  const [consoleTab, setConsoleTab] = useState<'request' | 'logs'>('request');
   const [progress, setProgress] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
   const [result, setResult] = useState<TrainingResult | null>(null);
@@ -181,6 +202,8 @@ export const ModelTrainingPage: React.FC = () => {
   const timersRef = useRef<number[]>([]);
   const pollTimerRef = useRef<number | null>(null);
   const logsRef = useRef<string[]>([]);
+  const seenLogKeysRef = useRef<Set<string>>(new Set());
+  const pollInFlightRef = useRef(false);
   const catalogSuggestionAppliedRef = useRef(false);
 
   // Derive individual fields from formState for inline use
@@ -335,8 +358,25 @@ export const ModelTrainingPage: React.FC = () => {
     };
   }, []);
 
-  const pushLog = (line: string) => {
-    const next = [...logsRef.current, `[${dayjs().format('HH:mm:ss')}] ${line}`];
+  const pushLog = (
+    line: string,
+    options: {
+      key?: string;
+      timestamp?: string;
+      source?: string;
+    } = {},
+  ) => {
+    const text = String(line || '').trim();
+    if (!text) return;
+    const key = options.key || text;
+    if (seenLogKeysRef.current.has(key)) return;
+    seenLogKeysRef.current.add(key);
+    const parsedTimestamp = options.timestamp ? dayjs(options.timestamp) : null;
+    const timestamp = parsedTimestamp?.isValid()
+      ? parsedTimestamp.format('HH:mm:ss')
+      : dayjs().format('HH:mm:ss');
+    const source = options.source ? `[${options.source}] ` : '';
+    const next = [...logsRef.current, `[${timestamp}] ${source}${text}`];
     logsRef.current = next;
     setLogs(next);
   };
@@ -350,8 +390,13 @@ export const ModelTrainingPage: React.FC = () => {
     clearTimers();
     setResultError('');
     setResult(null);
+    setLogs([]);
+    logsRef.current = [];
+    seenLogKeysRef.current.clear();
     setTrainingStatus('running');
-    setExecutionStage('准备训练请求');
+    setExecutionStage('已提交，等待调度');
+    setBackendRunStatus('pending');
+    setConsoleTab('logs');
     setProgress(5);
     pushLog(`正在提交训练请求：${displayName}`);
 
@@ -360,15 +405,22 @@ export const ModelTrainingPage: React.FC = () => {
       const { runId } = await modelTrainingService.runTraining(payload);
       pushLog(`提交成功，Run ID: ${runId}`);
 
-      pollTimerRef.current = window.setInterval(async () => {
-        const run = await modelTrainingService.getTrainingRun(runId);
+      const applyTrainingRun = (run: ModelTrainingRunStatus): boolean => {
         setBackendRunStatus(run.status || '');
-        if (run.logs) {
-           run.logs.split('\n').filter(Boolean).forEach(line => {
-             if (!logsRef.current.some(l => l.includes(line))) pushLog(line);
-           });
+        setExecutionStage(resolveTrainingStageLabel(run.stage, run.status));
+        setProgress(Math.max(5, Math.min(100, Number(run.progress || 0))));
+        const structuredEntries = Array.isArray(run.logEntries) ? run.logEntries : [];
+        if (structuredEntries.length > 0) {
+          structuredEntries.forEach((entry: ModelTrainingLogEntry) => {
+            pushLog(entry.line, {
+              key: entry.id || `${entry.timestamp}:${entry.line}`,
+              timestamp: entry.timestamp,
+              source: entry.source,
+            });
+          });
+        } else if (run.logs) {
+          run.logs.split('\n').filter(Boolean).forEach(line => pushLog(line));
         }
-        if (run.status === 'running') setProgress(Math.max(run.progress || 20, 20));
 
         if (run.isCompleted) {
           clearTimers();
@@ -376,22 +428,48 @@ export const ModelTrainingPage: React.FC = () => {
             const errorMsg = (run.result as any)?.error || '训练失败';
             setResultError(errorMsg);
             setTrainingStatus('draft');
+            setExecutionStage('训练失败');
           } else {
             const parsed = parseTrainingResult(requestPreview, runId, run.result);
             if (parsed) {
               setResult(parsed);
               setResultError('');
               setTrainingStatus('completed');
+              setExecutionStage('训练完成');
               setProgress(100);
               setCurrentStep(4);
               message.success('训练完成');
             } else {
               setResultError('结果解析失败');
               setTrainingStatus('draft');
+              setExecutionStage('结果解析失败');
             }
           }
+          return true;
         }
-      }, 3000);
+        return false;
+      };
+
+      const pollTrainingRun = async (): Promise<boolean> => {
+        if (pollInFlightRef.current) return false;
+        pollInFlightRef.current = true;
+        try {
+          const run = await modelTrainingService.getTrainingRun(runId);
+          return applyTrainingRun(run);
+        } catch (pollError: any) {
+          pushLog(`状态轮询失败，将自动重试：${pollError?.message || '网络错误'}`);
+          return false;
+        } finally {
+          pollInFlightRef.current = false;
+        }
+      };
+
+      const completedImmediately = await pollTrainingRun();
+      if (!completedImmediately) {
+        pollTimerRef.current = window.setInterval(() => {
+          void pollTrainingRun();
+        }, 3000);
+      }
     } catch (err: any) {
       message.error(`提交失败: ${err.message}`);
       setTrainingStatus('draft');
@@ -569,7 +647,7 @@ export const ModelTrainingPage: React.FC = () => {
                     {currentStep === 0 && <div className="space-y-4"><div className="rounded-2xl border border-slate-200 bg-white p-4"><div className="text-sm font-semibold text-slate-800">特征模式</div><div className="mt-3 flex flex-wrap gap-2"><button onClick={() => dispatch({ type: 'SET_FEATURE_MODE', payload: 'snapshot' })} className={clsx("rounded-lg border px-3 py-2 text-sm", featureMode === "snapshot" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600")}>自定义快照特征</button><button onClick={() => dispatch({ type: 'SET_FEATURE_MODE', payload: 'qlib_alpha158' })} className={clsx("rounded-lg border px-3 py-2 text-sm", featureMode === "qlib_alpha158" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 text-slate-600")}>Qlib 原生 Alpha158</button></div><p className="mt-2 text-xs text-slate-500">Alpha158 仅使用 Qlib 二进制 OHLCV + factor 数据，并固定使用 Qlib LightGBM；不会读取自定义特征快照。</p></div>{featureMode === "snapshot" ? <FeatureSelector categories={featureCategories} selectedFeatures={selectedFeatures} onChange={(f) => dispatch({ type: 'SET_FEATURES', payload: f })} loading={featureCatalogLoading} /> : <div className="rounded-2xl border border-blue-100 bg-blue-50 p-5 text-sm text-slate-700"><div className="font-semibold text-blue-800">已选择 Qlib Alpha158（158 个原生因子）</div><p className="mt-2">训练、预测与回测使用项目的 Qlib 数据目录；此模式不会因为扩展特征缺失而失败。</p></div>}</div>}
                     {currentStep === 1 && <TrainingTargetConfig target={target} timePeriods={timePeriods} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} onTimeChange={(k, v) => dispatch({ type: 'SET_TIME', key: k, value: v })} dataCoverage={dataCoverage} wfa={wfaConfig} onWfaChange={(w) => dispatch({ type: 'SET_WFA', payload: w })} />}
                     {currentStep === 2 && <ParameterConfig params={params} context={context} onParamsChange={(p) => dispatch({ type: 'SET_PARAMS', payload: p })} onContextChange={(c) => dispatch({ type: 'SET_CONTEXT', payload: c })} displayName={displayName} onDisplayNameChange={(n, m) => dispatch({ type: 'SET_DISPLAY_NAME', payload: { name: n, mode: m } })} autoDisplayName={autoDisplayName} market={currentMarket} />}
-                    {currentStep === 3 && <TrainingConsole trainingStatus={trainingStatus} executionStage={executionStage} progress={progress} logs={logs} backendRunStatus={backendRunStatus} result={result} requestPreview={requestPreview} totalDays={totalDays} trainDays={trainDays} valDays={valDays} testDays={testDays} target={target} />}
+                    {currentStep === 3 && <TrainingConsole trainingStatus={trainingStatus} executionStage={executionStage} progress={progress} logs={logs} backendRunStatus={backendRunStatus} result={result} requestPreview={requestPreview} totalDays={totalDays} trainDays={trainDays} valDays={valDays} testDays={testDays} target={target} activeTab={consoleTab} onTabChange={(key) => setConsoleTab(key as 'request' | 'logs')} />}
                     {currentStep === 4 && <TrainingResultView result={result} resultError={resultError} settingDefaultModel={settingDefaultModel} onSetDefaultModel={handleSetDefaultModel} trainingStatus={trainingStatus} />}
                   </motion.div>
                 </AnimatePresence>

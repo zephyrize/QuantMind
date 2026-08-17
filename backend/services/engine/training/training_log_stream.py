@@ -38,6 +38,63 @@ def _get_env_with_root_fallback(key: str, default: str = "") -> str:
 class TrainingRunLogStream:
     """训练任务容器日志实时流（Redis Stream + 最新状态快照）。"""
 
+    @staticmethod
+    def _infer_source(line: str) -> str:
+        text = str(line or "").strip().lower()
+        if text.startswith("[system]") or text.startswith("[notice]"):
+            return "orchestrator"
+        if "callback" in text:
+            return "callback"
+        return "training_stdout"
+
+    @staticmethod
+    def _infer_stage(status: str | None, line: str = "") -> str | None:
+        """Map orchestration state and stable training log markers to a UI stage."""
+        normalized_status = str(status or "").strip().lower()
+        by_status = {
+            "pending": "queued",
+            "provisioning": "starting",
+            "waiting_callback": "waiting_callback",
+            "completed": "completed",
+            "failed": "failed",
+        }
+        if normalized_status in by_status:
+            return by_status[normalized_status]
+
+        text = str(line or "").lower()
+        if any(
+            marker in text
+            for marker in ("result.json", "metadata.json", "model saved")
+        ):
+            return "saving_artifacts"
+        if any(
+            marker in text
+            for marker in (
+                "training until",
+                "early stopping",
+                "train's l2",
+                "fit & process data done",
+            )
+        ):
+            return "training"
+        if any(
+            marker in text
+            for marker in (
+                "loading data",
+                "init data",
+                "dropnalabel",
+                "cszscorenorm",
+                "local data hit",
+            )
+        ):
+            return "loading_data"
+        if any(
+            marker in text
+            for marker in ("starting container", "local conda process", "config saved")
+        ):
+            return "starting"
+        return "training" if normalized_status == "running" else None
+
     def __init__(self) -> None:
         self.enabled = str(
             os.getenv("TRAINING_LOG_STREAM_ENABLED", "true")
@@ -124,6 +181,8 @@ class TrainingRunLogStream:
         status: str | None = None,
         progress: int | None = None,
         container_id: str | None = None,
+        source: str | None = None,
+        stage: str | None = None,
     ) -> None:
         text = str(line or "").rstrip("\n")
         if not text:
@@ -140,6 +199,7 @@ class TrainingRunLogStream:
             "user_id": str(user_id or ""),
             "line": text,
             "ts": now_iso,
+            "source": source or self._infer_source(text),
         }
         if status:
             fields["status"] = str(status)
@@ -147,6 +207,9 @@ class TrainingRunLogStream:
             fields["progress"] = str(int(progress))
         if container_id:
             fields["container_id"] = str(container_id)
+        resolved_stage = stage or self._infer_stage(status, text)
+        if resolved_stage:
+            fields["stage"] = resolved_stage
 
         try:
             client.xadd(
@@ -166,6 +229,7 @@ class TrainingRunLogStream:
             progress=progress,
             last_line=text,
             container_id=container_id,
+            stage=resolved_stage,
         )
 
     def update_state(
@@ -178,18 +242,29 @@ class TrainingRunLogStream:
         progress: int | None = None,
         last_line: str = "",
         container_id: str | None = None,
+        stage: str | None = None,
     ) -> None:
         client = self._get_client()
         if client is None:
             return
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        state: dict[str, Any] = {
-            "run_id": str(run_id),
-            "tenant_id": str(tenant_id or "default"),
-            "user_id": str(user_id or ""),
-            "updated_at": now_iso,
-        }
+        state: dict[str, Any] = {}
+        try:
+            raw_state = client.get(self._state_key(run_id))
+            if raw_state:
+                state = json.loads(self._decode(raw_state))
+        except Exception:
+            state = {}
+
+        state.update(
+            {
+                "run_id": str(run_id),
+                "tenant_id": str(tenant_id or "default"),
+                "user_id": str(user_id or ""),
+                "updated_at": now_iso,
+            }
+        )
         if status:
             state["status"] = str(status)
         if progress is not None:
@@ -198,6 +273,9 @@ class TrainingRunLogStream:
             state["container_id"] = str(container_id)
         if last_line:
             state["last_line"] = str(last_line)
+        resolved_stage = stage or self._infer_stage(status, last_line)
+        if resolved_stage:
+            state["stage"] = resolved_stage
 
         try:
             client.setex(
@@ -224,6 +302,7 @@ class TrainingRunLogStream:
             state = {}
 
         lines: list[str] = []
+        entries: list[dict[str, str]] = []
         last_status = str(state.get("status") or "").strip()
         last_progress: int | None = None
         if state.get("progress") is not None:
@@ -238,12 +317,28 @@ class TrainingRunLogStream:
         except Exception:
             records = []
 
-        for _, payload in reversed(records):
+        for entry_id, payload in reversed(records):
             line = self._decode(
                 payload.get(b"line") if isinstance(payload, dict) else ""
             )
             if line:
                 lines.append(line)
+                entries.append(
+                    {
+                        "id": self._decode(entry_id),
+                        "timestamp": self._decode(
+                            payload.get(b"ts") if isinstance(payload, dict) else ""
+                        ),
+                        "source": self._decode(
+                            payload.get(b"source") if isinstance(payload, dict) else ""
+                        )
+                        or self._infer_source(line),
+                        "stage": self._decode(
+                            payload.get(b"stage") if isinstance(payload, dict) else ""
+                        ),
+                        "line": line,
+                    }
+                )
             if not last_status:
                 status_val = self._decode(
                     payload.get(b"status") if isinstance(payload, dict) else ""
@@ -267,4 +362,6 @@ class TrainingRunLogStream:
             "updated_at": str(state.get("updated_at") or ""),
             "container_id": str(state.get("container_id") or ""),
             "last_line": str(state.get("last_line") or ""),
+            "stage": str(state.get("stage") or ""),
+            "log_entries": entries,
         }

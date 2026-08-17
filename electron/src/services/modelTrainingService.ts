@@ -9,11 +9,21 @@ export interface ModelTrainingRunResponse {
   payload?: Record<string, unknown>;
 }
 
+export interface ModelTrainingLogEntry {
+  id: string;
+  timestamp: string;
+  source: string;
+  stage: string;
+  line: string;
+}
+
 export interface ModelTrainingRunStatus {
   runId: string;
   status: string;
   progress: number;
   logs: string;
+  stage?: string;
+  logEntries?: ModelTrainingLogEntry[];
   result?: Record<string, unknown>;
   isCompleted: boolean;
 }

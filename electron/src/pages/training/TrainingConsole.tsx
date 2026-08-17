@@ -23,6 +23,8 @@ interface TrainingConsoleProps {
   valDays: number;
   testDays: number;
   target: { horizonDays: number; mode: string };
+  activeTab: string;
+  onTabChange: (key: string) => void;
 }
 
 const SectionHeader: React.FC<{ title: string; desc: string; icon?: React.ReactNode }> = ({ title, desc, icon }) => (
@@ -67,8 +69,18 @@ export const TrainingConsole: React.FC<TrainingConsoleProps> = ({
   valDays,
   testDays,
   target,
+  activeTab,
+  onTabChange,
 }) => {
   const navigate = useNavigate();
+  const requestStatus = {
+    pending: '等待调度',
+    provisioning: '启动中',
+    running: '训练中',
+    waiting_callback: '等待回调',
+    completed: '已完成',
+    failed: '失败',
+  }[backendRunStatus.toLowerCase()] || '编排中';
 
   return (
     <div className="space-y-4">
@@ -127,7 +139,7 @@ export const TrainingConsole: React.FC<TrainingConsoleProps> = ({
               label="请求状态"
               value={
                 trainingStatus === 'running'
-                  ? (backendRunStatus === 'waiting_callback' ? '等待回调' : '编排中')
+                  ? requestStatus
                   : trainingStatus === 'completed'
                     ? '已完成'
                     : '待开始'
@@ -156,7 +168,8 @@ export const TrainingConsole: React.FC<TrainingConsoleProps> = ({
         />
         <Divider className="my-4" />
         <Tabs
-          defaultActiveKey="request"
+          activeKey={activeTab}
+          onChange={onTabChange}
           items={[
             {
               key: 'request',

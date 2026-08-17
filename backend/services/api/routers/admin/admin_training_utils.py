@@ -964,6 +964,7 @@ async def get_training_run_for_owner(run_id: str, current_user: dict[str, Any]) 
 
     live_snapshot = _training_log_stream.fetch_snapshot(run_id, line_limit=220) or {}
     live_status = str(live_snapshot.get("status") or "").strip()
+    live_stage = str(live_snapshot.get("stage") or "").strip()
     live_progress_raw = live_snapshot.get("progress")
     live_logs = str(live_snapshot.get("logs") or "").strip()
 
@@ -989,6 +990,8 @@ async def get_training_run_for_owner(run_id: str, current_user: dict[str, Any]) 
         "status": effective_status,
         "progress": progress,
         "logs": merged_logs,
+        "stage": live_stage,
+        "logEntries": list(live_snapshot.get("log_entries") or []),
         "result": normalized_result,
         "isCompleted": effective_status in ["completed", "failed"],
     }
@@ -1116,6 +1119,7 @@ async def complete_training_run(
                     line=text,
                     status=status,
                     progress=100,
+                    source="callback",
                 )
 
     # 训练完成后立即清理容器，避免面板长期堆积 Exited 的 qm-train-* 容器
