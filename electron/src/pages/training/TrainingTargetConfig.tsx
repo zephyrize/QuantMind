@@ -65,6 +65,7 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
   
   const minDataDate = dataCoverage?.min_date ? dayjs(dataCoverage.min_date) : null;
   const maxDataDate = dataCoverage?.max_date ? dayjs(dataCoverage.max_date) : null;
+  const isQlibCoverage = dataCoverage?.source === 'qlib_calendar';
 
   const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
@@ -229,11 +230,17 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
           <div className="mb-4 rounded-xl border border-slate-200 bg-gradient-to-r from-slate-50 to-indigo-50/30 p-3">
             <div className="flex items-center gap-2 text-xs">
               <CalendarRange size={14} className="text-indigo-500" />
-              <span className="font-semibold text-slate-700">数据有效期</span>
+              <span className="font-semibold text-slate-700">
+                {isQlibCoverage ? 'Qlib 可标注样本期' : '数据有效期'}
+              </span>
               <Tag className="m-0 rounded-lg border-0 bg-white/80 text-slate-600 font-mono text-[11px]">
                 {dataCoverage.min_date} ~ {dataCoverage.max_date}
               </Tag>
-              <Tooltip title={`共 ${dataCoverage.total_rows?.toLocaleString() ?? 0} 条记录，${dataCoverage.file_count ?? 0} 个 parquet 文件`}>
+              <Tooltip title={
+                isQlibCoverage
+                  ? `原始 Qlib 数据截至 ${dataCoverage.raw_max_date}；T+${dataCoverage.label_horizon_days ?? 0} 已自动扣除末尾未完成标签的交易日。`
+                  : `共 ${dataCoverage.total_rows?.toLocaleString() ?? 0} 条记录，${dataCoverage.file_count ?? 0} 个 parquet 文件`
+              }>
                 <Info size={12} className="text-slate-400 cursor-help" />
               </Tooltip>
             </div>

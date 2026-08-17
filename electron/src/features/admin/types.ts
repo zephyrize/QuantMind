@@ -114,6 +114,8 @@ export interface AdminModelFeatureDataCoverage {
     min_date: string;
     max_date: string;
     suggested_periods?: AdminModelFeatureSuggestedPeriods | null;
+    raw_max_date?: string | null;
+    label_horizon_days?: number;
 }
 
 export interface AdminModelFeatureCatalog {

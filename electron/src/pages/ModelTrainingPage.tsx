@@ -282,14 +282,42 @@ export const ModelTrainingPage: React.FC = () => {
         if (active) setFeatureCatalogLoading(false);
       }
 
+    };
+    loadCatalog();
+    return () => { active = false; };
+  }, [currentMarket]);
+
+  // 日期边界必须与数据模式一致：快照模式读 Parquet 覆盖范围，
+  // Alpha158 则读 Qlib 交易日历，并将标签可用上限向前收缩 T+N 个交易日。
+  useEffect(() => {
+    let active = true;
+    const loadCoverage = async () => {
+      setDataCoverage(null);
       try {
-        const catalogWithCoverage = await modelTrainingService.getFeatureCatalog(currentMarket, true);
-        if (!active) return;
-        if (catalogWithCoverage.data_coverage) {
-          setDataCoverage(catalogWithCoverage.data_coverage);
+        if (featureMode === 'qlib_alpha158') {
+          const range = await modelTrainingService.getQlibDataRange(target.horizonDays);
+          if (!active || !range.exists || !range.min_date || !range.max_label_date) return;
+          setDataCoverage({
+            source: 'qlib_calendar',
+            snapshot_dir: 'db/qlib_data/calendars/day.txt',
+            file_count: 1,
+            scanned_files: 1,
+            failed_files: 0,
+            total_rows: range.total_trading_days,
+            min_date: range.min_date,
+            max_date: range.max_label_date,
+            raw_max_date: range.max_date,
+            label_horizon_days: range.label_horizon_days,
+          });
+          return;
         }
-        if (catalogWithCoverage.data_coverage?.suggested_periods && !catalogSuggestionAppliedRef.current) {
-          const suggested = parseSuggestedTimePeriods(catalogWithCoverage.data_coverage.suggested_periods);
+
+        const catalog = await modelTrainingService.getFeatureCatalog(currentMarket, true);
+        if (!active) return;
+        const coverage = catalog.data_coverage;
+        if (coverage) setDataCoverage(coverage);
+        if (coverage?.suggested_periods && !catalogSuggestionAppliedRef.current) {
+          const suggested = parseSuggestedTimePeriods(coverage.suggested_periods);
           if (suggested) {
             dispatch({ type: 'SET_TIME', key: 'train', value: suggested.train });
             dispatch({ type: 'SET_TIME', key: 'val', value: suggested.val });
@@ -297,11 +325,13 @@ export const ModelTrainingPage: React.FC = () => {
             catalogSuggestionAppliedRef.current = true;
           }
         }
-      } catch { /* coverage failure ok */ }
+      } catch {
+        // 日期控件仍可按三段不重叠规则工作，训练时会继续校验真实数据。
+      }
     };
-    loadCatalog();
+    void loadCoverage();
     return () => { active = false; };
-  }, [currentMarket]);
+  }, [currentMarket, featureMode, target.horizonDays]);
 
   // P0-4: 草稿恢复 — 一次 dispatch 原子化写入（替代 7 个 setState）
   useEffect(() => {

@@ -520,6 +520,7 @@ async def get_model_feature_catalog(
 
 @router.get("/qlib-data-range", summary="获取 Qlib 数据日期范围")
 async def get_qlib_data_range(
+    horizon_days: int = Query(0, ge=0, le=60),
     current_user: dict[str, Any] = Depends(get_current_user),
 ):
     """
@@ -534,6 +535,8 @@ async def get_qlib_data_range(
         "exists": False,
         "min_date": None,
         "max_date": None,
+        "max_label_date": None,
+        "label_horizon_days": horizon_days,
         "total_trading_days": 0,
     }
 
@@ -551,6 +554,8 @@ async def get_qlib_data_range(
             result["min_date"] = calendar[0]
             result["max_date"] = calendar[-1]
             result["total_trading_days"] = len(calendar)
+            if len(calendar) > horizon_days:
+                result["max_label_date"] = calendar[-(horizon_days + 1)]
     except Exception as e:
         logger.warning("Failed to read qlib calendar: %s", e)
 

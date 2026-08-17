@@ -28,6 +28,15 @@ export interface ModelTrainingRunStatus {
   isCompleted: boolean;
 }
 
+export interface QlibDataRange {
+  exists: boolean;
+  min_date: string | null;
+  max_date: string | null;
+  max_label_date: string | null;
+  label_horizon_days: number;
+  total_trading_days: number;
+}
+
 export interface UserModelRecord {
   tenant_id: string;
   user_id: string;
@@ -557,6 +566,13 @@ class ModelTrainingService {
 
   async getTrainingRun(runId: string): Promise<ModelTrainingRunStatus> {
     const resp = await this.client.get<ModelTrainingRunStatus>(`/models/training-runs/${runId}`);
+    return resp.data;
+  }
+
+  async getQlibDataRange(horizonDays: number): Promise<QlibDataRange> {
+    const resp = await this.client.get<QlibDataRange>('/models/qlib-data-range', {
+      params: { horizon_days: Math.max(0, Math.floor(horizonDays || 0)) },
+    });
     return resp.data;
   }
 
