@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -718,6 +719,211 @@ class ModelRegistryService:
         if archived is None:
             raise ValueError("archive result unavailable")
         return archived
+
+    def _resolve_user_model_storage_path(
+        self, storage_path: str, *, model_id: str
+    ) -> Path | None:
+        """Resolve a user-model artifact path without trusting its persisted prefix.
+
+        Older registrations may retain the path from a different runtime, such as
+        ``/app/models/users/...`` from Docker while the API now runs on the host.
+        In that case only the suffix after ``models/users/`` is reused below the
+        *current* user-model root.  The persisted prefix is never a delete target.
+        """
+        raw_path = str(storage_path or "").strip()
+        if not raw_path:
+            return None
+
+        root = self.user_models_root.resolve()
+        candidate = Path(raw_path).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            normalized = raw_path.replace("\\", "/").rstrip("/")
+            marker = "/models/users/"
+            marker_index = normalized.lower().rfind(marker)
+            if marker_index < 0:
+                raise ValueError(
+                    "model storage path is outside the user models root"
+                ) from exc
+            relative_parts = [
+                part for part in normalized[marker_index + len(marker):].split("/") if part
+            ]
+            if any(part in {".", ".."} for part in relative_parts):
+                raise ValueError("model storage path contains an invalid path segment") from exc
+            if not relative_parts:
+                raise ValueError(
+                    "model storage path does not identify a model directory"
+                ) from exc
+            candidate = root.joinpath(*relative_parts).resolve()
+            try:
+                candidate.relative_to(root)
+            except ValueError as mapped_exc:
+                raise ValueError(
+                    "mapped model storage path is outside the user models root"
+                ) from mapped_exc
+        if candidate == root:
+            raise ValueError("refusing to delete the user models root")
+        if candidate.name != str(model_id):
+            raise ValueError("model storage path does not match the requested model")
+        return candidate
+
+    async def delete_archived_model(
+        self, *, tenant_id: str, user_id: str, model_id: str
+    ) -> dict[str, Any]:
+        """Permanently remove an archived user model and its local artifacts.
+
+        The operation deliberately excludes ready/active models and models used by
+        a ready/active ensemble.  Model artifacts are first renamed into a private
+        staging path so a database failure can restore the original directory.
+        """
+        tenant, user = self._normalize_owner(tenant_id=tenant_id, user_id=user_id)
+        mid = str(model_id).strip()
+        if not mid:
+            raise ValueError("model_id is required")
+
+        model = await self.get_model(tenant_id=tenant, user_id=user, model_id=mid)
+        if model is None:
+            raise ValueError("model not found")
+        if str(model.get("status") or "") != "archived":
+            raise ValueError("only archived models can be permanently deleted")
+        metadata = (
+            model.get("metadata_json")
+            if isinstance(model.get("metadata_json"), dict)
+            else {}
+        )
+        if bool(metadata.get("readonly")):
+            raise ValueError("system model cannot be deleted")
+
+        # A fusion model stores its source IDs in metadata and reads the source
+        # artifact directories at inference time.  Do not leave a usable fusion
+        # model with a broken source directory.
+        async with get_session(read_only=True) as session:
+            dependent_rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT model_id
+                        FROM qm_user_models
+                        WHERE tenant_id = :tenant_id AND user_id = :user_id
+                          AND model_id <> :model_id
+                          AND status IN ('ready', 'active')
+                          AND COALESCE(metadata_json->'source_model_ids', '[]'::jsonb) ? :model_id
+                        ORDER BY updated_at DESC
+                        LIMIT 10
+                        """
+                    ),
+                    {"tenant_id": tenant, "user_id": user, "model_id": mid},
+                )
+            ).mappings().all()
+        dependent_model_ids = [str(row.get("model_id") or "") for row in dependent_rows]
+        if dependent_model_ids:
+            raise ValueError(
+                "model is used by active ensemble model(s): "
+                + ", ".join(dependent_model_ids)
+            )
+
+        artifact_dir = self._resolve_user_model_storage_path(
+            str(model.get("storage_path") or ""), model_id=mid
+        )
+        staged_dir: Path | None = None
+        if artifact_dir and artifact_dir.exists():
+            staged_dir = artifact_dir.with_name(
+                f".{artifact_dir.name}.deleting-{uuid.uuid4().hex}"
+            )
+            try:
+                artifact_dir.rename(staged_dir)
+            except OSError as exc:
+                raise ValueError(
+                    f"unable to stage model artifacts for deletion: {exc}"
+                ) from exc
+
+        removed_bindings: list[str] = []
+        removed_inference_settings = False
+        try:
+            async with get_session() as session:
+                bindings = (
+                    await session.execute(
+                        text(
+                            """
+                            DELETE FROM qm_strategy_model_bindings
+                            WHERE tenant_id = :tenant_id AND user_id = :user_id AND model_id = :model_id
+                            RETURNING strategy_id
+                            """
+                        ),
+                        {"tenant_id": tenant, "user_id": user, "model_id": mid},
+                    )
+                ).mappings().all()
+                removed_bindings = [
+                    str(row.get("strategy_id") or "") for row in bindings
+                ]
+                removed_inference_settings = bool(
+                    (
+                        await session.execute(
+                            text(
+                                """
+                                DELETE FROM qm_model_inference_settings
+                                WHERE tenant_id = :tenant_id AND user_id = :user_id
+                                  AND model_id = :model_id
+                                RETURNING model_id
+                                """
+                            ),
+                            {"tenant_id": tenant, "user_id": user, "model_id": mid},
+                        )
+                    ).mappings().first()
+                )
+                deleted = (
+                    await session.execute(
+                        text(
+                            """
+                            DELETE FROM qm_user_models
+                            WHERE tenant_id = :tenant_id AND user_id = :user_id
+                              AND model_id = :model_id AND status = 'archived'
+                            RETURNING model_id
+                            """
+                        ),
+                        {"tenant_id": tenant, "user_id": user, "model_id": mid},
+                    )
+                ).mappings().first()
+                if not deleted:
+                    raise ValueError(
+                        "model is no longer archived or has already been deleted"
+                    )
+        except Exception:
+            if staged_dir and staged_dir.exists():
+                try:
+                    staged_dir.rename(artifact_dir)
+                except OSError:
+                    logger.exception(
+                        "Failed to restore staged artifacts after model deletion rollback: %s",
+                        staged_dir,
+                    )
+            raise
+
+        artifacts_deleted = True
+        cleanup_error = ""
+        if staged_dir and staged_dir.exists():
+            try:
+                shutil.rmtree(staged_dir)
+            except OSError as exc:
+                artifacts_deleted = False
+                cleanup_error = str(exc)
+                try:
+                    staged_dir.rename(artifact_dir)
+                except OSError:
+                    logger.exception(
+                        "Failed to restore model artifacts after cleanup failure: %s",
+                        staged_dir,
+                    )
+
+        return {
+            "deleted": True,
+            "model_id": mid,
+            "removed_strategy_bindings": removed_bindings,
+            "removed_inference_settings": removed_inference_settings,
+            "artifacts_deleted": artifacts_deleted,
+            "cleanup_error": cleanup_error,
+        }
 
     async def get_strategy_binding(
         self,

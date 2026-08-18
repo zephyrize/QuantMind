@@ -778,6 +778,23 @@ async def archive_user_model(
     return model
 
 
+@router.delete("/{model_id}", summary="永久删除已归档用户模型（用户态）")
+async def delete_archived_user_model(
+    model_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    tenant_id = str(current_user.get("tenant_id") or "default")
+    user_id = str(current_user.get("user_id") or current_user.get("sub") or "")
+    try:
+        return await model_registry_service.delete_archived_model(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            model_id=model_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 def _build_precheck_items(
     *,
     resolved_model_id: str,

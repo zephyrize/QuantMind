@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Layers, Star, RefreshCw, Search, Code, Calendar, Layers2,
-  History, Archive, Brain, Clock, XCircle, X,
+  History, Archive, Brain, Clock, XCircle, X, Trash2,
   ChevronRight, Play, Cpu, Download, ChevronDown,
   ChevronUp, Shield, Zap, Activity, ListFilter, BarChart3, TrendingUp, TrendingDown,
 } from 'lucide-react';
@@ -81,6 +81,7 @@ export const ModelRegistryPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [settingDefault, setSettingDefault] = useState(false);
   const [archiving, setArchiving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [mainTab, setMainTab] = useState('detail');
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [activeConfigTab, setActiveConfigTab] = useState<'meta' | 'metrics'>('meta');
@@ -406,6 +407,32 @@ export const ModelRegistryPage: React.FC = () => {
     });
   };
 
+  const handleDeleteArchived = () => {
+    if (!selectedModel || selectedModel.status !== 'archived') return;
+    Modal.confirm({
+      title: '永久删除模型',
+      content: `确定永久删除 "${selectedModel.model_id}" 吗？模型文件、元数据、策略绑定和自动推理设置将被删除，且无法恢复。`,
+      okText: '永久删除', okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        setDeleting(true);
+        try {
+          const result = await modelTrainingService.deleteArchivedUserModel(selectedModel.model_id);
+          if (result.artifacts_deleted) {
+            message.success('模型及其文件已永久删除');
+          } else {
+            message.warning('模型记录已删除，但模型文件清理未完成，请联系管理员处理');
+          }
+          setSelectedId(null);
+          await loadModels(true);
+        } catch (err: any) {
+          const detail = err?.response?.data?.detail ?? err?.message ?? '未知错误';
+          message.error(`删除失败: ${detail}`);
+        } finally { setDeleting(false); }
+      },
+    });
+  };
+
   const handleRunInference = async () => {
     if (!selectedModel || !inferenceDate) return;
     setInferenceRunning(true);
@@ -706,6 +733,15 @@ export const ModelRegistryPage: React.FC = () => {
                             >设为默认</Button>
                           )}
                         </>
+                      )}
+                      {selectedModel.status === 'archived' && !isSystemModel(selectedModel) && (
+                        <Button
+                          danger
+                          icon={<Trash2 size={13} />}
+                          className="rounded-xl h-9 px-4 font-bold text-xs"
+                          onClick={handleDeleteArchived}
+                          loading={deleting}
+                        >永久删除</Button>
                       )}
                     </div>
                   </div>

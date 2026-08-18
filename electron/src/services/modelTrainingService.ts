@@ -53,6 +53,15 @@ export interface UserModelRecord {
   activated_at?: string | null;
 }
 
+export interface DeleteArchivedModelResult {
+  deleted: boolean;
+  model_id: string;
+  removed_strategy_bindings: string[];
+  removed_inference_settings: boolean;
+  artifacts_deleted: boolean;
+  cleanup_error: string;
+}
+
 export interface CreateEnsembleParams {
   source_model_ids: string[];
   display_name?: string;
@@ -640,6 +649,11 @@ class ModelTrainingService {
 
   async archiveUserModel(modelId: string): Promise<UserModelRecord> {
     const resp = await this.client.post<UserModelRecord>(`/models/${modelId}/archive`);
+    return resp.data;
+  }
+
+  async deleteArchivedUserModel(modelId: string): Promise<DeleteArchivedModelResult> {
+    const resp = await this.client.delete<DeleteArchivedModelResult>(`/models/${modelId}`);
     return resp.data;
   }
 
